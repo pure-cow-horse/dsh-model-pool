@@ -1,0 +1,5 @@
+# dsh-model-pool bundle layer — applied when a profile lists this bundle.
+# name 是包名（经 profile 的 node_modules 解析），不是相对路径。
+- insert:
+    - id: dsh-model-pool
+      name: dsh-model-pool

@@ -1,0 +1,15 @@
+# 依赖
+node_modules/
+
+# 运行时数据与日志（不入库）
+model-pool.json
+*.log
+
+# 内部开发笔记（不公开）
+DESIGN.md
+
+# 系统/编辑器垃圾
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
