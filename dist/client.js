@@ -7,6 +7,26 @@
   const NS = "model-pool";
   const t = (k) => k;
 
+  // 左侧导航图标：数据库圆柱（模型集中成池），线性 outline 风格
+  function ModelPoolIcon({ size = 16 }) {
+    return React.createElement("svg", {
+      width: size,
+      height: size,
+      viewBox: "0 0 24 24",
+      fill: "none",
+      stroke: "currentColor",
+      strokeWidth: 1.8,
+      strokeLinecap: "round",
+      strokeLinejoin: "round",
+      "aria-hidden": "true"
+    },
+      React.createElement("ellipse", { cx: 12, cy: 5, rx: 7, ry: 2.2 }),
+      React.createElement("path", { d: "M5 5v14c0 1.2 3.1 2.2 7 2.2s7-1 7-2.2V5" }),
+      React.createElement("path", { d: "M5 12c0 1.2 3.1 2.2 7 2.2s7-1 7-2.2" }),
+      React.createElement("path", { d: "M5 18.6c0 1.2 3.1 2.2 7 2.2s7-1 7-2.2" })
+    );
+  }
+
   // 模型族识别（用于「纯 deepseek / 纯 glm …」自定义方案）
   function familyOf(modelId) {
     const id = modelId.toLowerCase();
@@ -26,6 +46,10 @@
     btn: { height: 28, padding: "0 14px", fontSize: 12, cursor: "pointer", borderRadius: 14, border: "1px solid var(--dsw-alias-border-l2,#ddd)", background: "transparent", color: "inherit" },
     btnPrimary: { background: "var(--dsw-alias-button-primary-fill,#4f46e5)", color: "#fff", border: "none" },
     select: { height: 28, padding: "0 8px", fontSize: 12, borderRadius: 8, border: "1px solid var(--dsw-alias-border-l2,#ddd)" },
+    search: { height: 28, width: 180, padding: "0 10px", fontSize: 12, borderRadius: 14, border: "1px solid var(--dsw-alias-border-l2,#ddd)", background: "transparent", color: "inherit" },
+    notice: { fontSize: 12, marginLeft: 8 },
+    noticeOk: { color: "#1a7f37" },
+    noticeErr: { color: "#c0392b" },
     table: { width: "100%", borderCollapse: "collapse", fontSize: 12 },
     th: { textAlign: "left", padding: "6px 8px", borderBottom: "1px solid #eee", fontWeight: 600 },
     td: { padding: "6px 8px", borderBottom: "1px solid #f3f3f3" },
@@ -53,10 +77,15 @@
     const { useState, useEffect, useRef } = getReact();
     const [models, setModels] = useState([]);
     const [results, setResults] = useState({}); // key -> {status,latency,error,code}
+    const [lastTestAt, setLastTestAt] = useState(null); // 上次批量测试时间戳
     const [checked, setChecked] = useState({});
     const [filter, setFilter] = useState("all"); // all/ok/provider/family
     const [filterVal, setFilterVal] = useState("");
     const [busy, setBusy] = useState(false);
+    const [showUnreg, setShowUnreg] = useState(false); // 默认隐藏未注册供应商，勾选后显示
+    const [kw, setKw] = useState(""); // 模型目录搜索词
+    const [refreshing, setRefreshing] = useState(false);
+    const [notice, setNotice] = useState(null); // { text, type: "ok"|"err" }
     const [state, setState] = useState({ activeScheme: "default", schemes: {} });
     const [newScheme, setNewScheme] = useState("");
     const [meta, setMeta] = useState("尚未加载");
@@ -65,13 +94,22 @@
     const dragRef = useRef(null); // 当前拖拽的链下标
     const [current, setCurrent] = useState(null); // 最近一次实际命中
 
-    const loadModels = async () => {
+    const loadModels = async (manual) => {
+      if (manual) { setRefreshing(true); setNotice(null); }
       try {
         const j = await api("/api/model-pool/models");
         setMeta(`ok=${!!j.ok} models=${Array.isArray(j.models) ? j.models.length : "非数组:" + typeof j.models} count=${j.count}`);
-        if (j.ok) setModels(j.models || []);
+        if (j.ok) {
+          setModels(j.models || []);
+          if (manual) setNotice({ text: `已更新 · ${(j.models || []).length} 个模型`, type: "ok" });
+        } else if (manual) {
+          setNotice({ text: j?.error || "目录返回异常", type: "err" });
+        }
       } catch (e) {
         setMeta("请求异常: " + (e?.message || String(e)));
+        if (manual) setNotice({ text: "刷新失败: " + (e?.message || String(e)), type: "err" });
+      } finally {
+        if (manual) setRefreshing(false);
       }
     };
     const loadState = async () => {
@@ -84,11 +122,25 @@
         if (j.ok) setCurrent(j.status);
       } catch { /* 忽略 */ }
     };
-    useEffect(() => { loadModels(); loadState(); loadCurrent(); }, []);
+    const saveProbe = (results, lastTestAt) => {
+      const body = { results };
+      if (lastTestAt != null) body.lastTestAt = lastTestAt;
+      api("/api/model-pool/probe-results", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).catch(() => {});
+    };
+    const loadProbe = async () => {
+      try {
+        const j = await api("/api/model-pool/probe-results");
+        if (j.ok && j.results) setResults((p) => ({ ...j.results, ...p }));
+        if (j.ok && j.lastTestAt) setLastTestAt(j.lastTestAt);
+      } catch { /* 忽略 */ }
+    };
+    useEffect(() => { loadModels(); loadState(); loadCurrent(); loadProbe(); }, []);
 
     const testOne = async (key) => {
       const j = await api("/api/model-pool/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key }) });
-      setResults((p) => ({ ...p, [key]: j }));
+      const n = { ...results, [key]: j };
+      setResults(n);
+      saveProbe(n);
     };
     const testAll = async () => {
       setBusy(true);
@@ -102,6 +154,9 @@
         }));
       }
       setResults(out);
+      const ts = Date.now();
+      setLastTestAt(ts);
+      saveProbe(out, ts);
       setBusy(false);
     };
 
@@ -155,17 +210,21 @@
       persistChain(next);
     };
 
+    const q = kw.trim().toLowerCase();
     const filtered = models.filter((m) => {
+      if (!showUnreg && m.registered === false) return false; // 默认隐藏未注册供应商
+      if (q) {
+        const hay = [m.modelId, m.displayName, m.provider, familyOf(m.modelId)].join(" ").toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
       if (filter === "ok" && results[m.key]?.status !== "ok") return false;
       if (filter === "provider" && m.provider !== filterVal) return false;
       if (filter === "family" && familyOf(m.modelId) !== filterVal) return false;
       return true;
     });
-    const visible = filtered.slice(0, 150); // 全量上千行会卡死，先渲染前 150 条
-
-    // 按供应商分组（可折叠）
+    // 按供应商分组（可折叠）：分组基于全量过滤结果，避免排在后面的渠道组头不出现
     const groups = {};
-    for (const m of visible) (groups[m.provider] = groups[m.provider] || []).push(m);
+    for (const m of filtered) (groups[m.provider] = groups[m.provider] || []).push(m);
     const groupKeys = Object.keys(groups);
 
     const badge = (key) => {
@@ -187,9 +246,10 @@
       persistChain(next);
     };
 
-    const allCollapsed = groupKeys.length > 0 && groupKeys.every((k) => collapsed[k]);
+    // 未显式展开即视为折叠（打开默认全部收起）；显式 false 才是展开
+    const allCollapsed = groupKeys.length > 0 && groupKeys.every((k) => collapsed[k] !== false);
     const toggleAll = () => {
-      if (allCollapsed) setCollapsed({});
+      if (allCollapsed) setCollapsed(Object.fromEntries(groupKeys.map((k) => [k, false])));
       else setCollapsed(Object.fromEntries(groupKeys.map((k) => [k, true])));
     };
 
@@ -200,8 +260,9 @@
 
     const modelsPane = React.createElement("div", null,
       React.createElement("div", { style: styles.toolbar },
-        React.createElement("button", { style: { ...styles.btn, ...styles.btnPrimary }, onClick: loadModels }, "刷新目录"),
+        React.createElement("button", { style: { ...styles.btn, ...styles.btnPrimary }, onClick: () => loadModels(true), disabled: refreshing }, refreshing ? "刷新中…" : "刷新目录"),
         React.createElement("button", { style: styles.btn, onClick: testAll, disabled: busy }, busy ? "测试中…" : "测试全部"),
+        React.createElement("input", { style: styles.search, placeholder: "搜索模型 / 供应商 / 族", value: kw, onChange: (e) => setKw(e.target.value) }),
         React.createElement("select", { style: styles.select, value: filter, onChange: (e) => setFilter(e.target.value) },
           React.createElement("option", { value: "all" }, "全部"),
           React.createElement("option", { value: "ok" }, "仅可用"),
@@ -211,9 +272,18 @@
         filter !== "all" && React.createElement("select", { style: styles.select, value: filterVal, onChange: (e) => setFilterVal(e.target.value) },
           (filter === "provider" ? providers : families).map((v) => React.createElement("option", { key: v, value: v }, v))
         ),
-        React.createElement("button", { style: styles.btn, onClick: toggleAll }, allCollapsed ? "全部展开" : "全部折叠")
+        React.createElement("button", { style: styles.btn, onClick: toggleAll }, allCollapsed ? "全部展开" : "全部折叠"),
+        React.createElement("label", { style: { fontSize: 12, display: "flex", alignItems: "center", gap: 4, cursor: "pointer", whiteSpace: "nowrap" } },
+          React.createElement("input", { type: "checkbox", checked: showUnreg, onChange: (e) => setShowUnreg(e.target.checked) }),
+          "显示未注册"
+        )
       ),
-      React.createElement("div", { style: { fontSize: 12, color: "#888", margin: "4px 0 10px" } }, `共 ${models.length} 个模型`),
+      React.createElement("div", { style: { fontSize: 12, color: "#888", margin: "4px 0 10px", display: "flex", alignItems: "center", gap: 10 } },
+        React.createElement("span", null, q ? `匹配 ${filtered.length} / 共 ${models.length} 个模型` : `共 ${models.length} 个模型`),
+        notice && React.createElement("span", { style: { ...styles.notice, ...(notice.type === "ok" ? styles.noticeOk : styles.noticeErr) } }, notice.text),
+        lastTestAt && React.createElement("span", { style: { fontSize: 12, color: "#999" }, title: new Date(lastTestAt).toLocaleString() },
+          `上次测试 ${new Date(lastTestAt).toLocaleTimeString()}`)
+      ),
       React.createElement("div", { style: { maxHeight: "calc(100vh - 230px)", overflowY: "auto", border: "1px solid #f0f0f0", borderRadius: 8 } },
       React.createElement("table", { style: styles.table },
         React.createElement("thead", null, React.createElement("tr", null,
@@ -227,31 +297,34 @@
         )),
         React.createElement("tbody", null, groupKeys.flatMap((provider) => {
           const rows = groups[provider];
-          const isCol = !!collapsed[provider];
+          const isCol = collapsed[provider] !== false;
           const selCount = rows.filter((r) => checked[r.key]).length;
           const headRow = React.createElement("tr", {
             key: "g:" + provider,
-            onClick: () => setCollapsed((p) => ({ ...p, [provider]: !p[provider] })),
+            onClick: () => setCollapsed((p) => ({ ...p, [provider]: p[provider] === false ? true : false })),
             style: { cursor: "pointer", background: "#f7f7f9", fontWeight: 600, userSelect: "none" }
           }, React.createElement("td", { colSpan: 7 },
             (isCol ? "▶ " : "▼ ") + rows[0].displayName + `（${rows.length} 个模型` + (selCount ? `，已选 ${selCount}` : "") + "）"
           ));
           if (isCol) return [headRow];
-          return [headRow, ...rows.map((m) => React.createElement("tr", { key: m.key },
-            React.createElement("td", { style: styles.td }, React.createElement("input", { type: "checkbox", checked: !!checked[m.key], onChange: () => setChecked((p) => ({ ...p, [m.key]: !p[m.key] })) })),
-            React.createElement("td", { style: styles.td }, m.displayName),
-            React.createElement("td", { style: styles.td }, m.modelId),
-            React.createElement("td", { style: styles.td }, familyOf(m.modelId)),
-            React.createElement("td", { style: styles.td }, m.free ? "是" : m.configured ? "—" : "?"),
-            React.createElement("td", { style: styles.td }, badge(m.key)),
-            React.createElement("td", { style: styles.td }, React.createElement("button", { style: styles.btn, onClick: () => testOne(m.key) }, "测"))
-          ))];
+          return [headRow, ...rows.slice(0, 20).map((m) => {
+            const unavailable = m.registered === false;
+            return React.createElement("tr", { key: m.key, style: { opacity: unavailable ? 0.45 : 1 } },
+              React.createElement("td", { style: styles.td }, React.createElement("input", { type: "checkbox", disabled: unavailable, checked: !!checked[m.key], onChange: () => setChecked((p) => ({ ...p, [m.key]: !p[m.key] })) })),
+              React.createElement("td", { style: styles.td }, m.displayName),
+              React.createElement("td", { style: styles.td }, m.modelId),
+              React.createElement("td", { style: styles.td }, familyOf(m.modelId)),
+              React.createElement("td", { style: styles.td }, m.free ? "是" : m.configured ? "—" : "?"),
+              React.createElement("td", { style: styles.td }, badge(m.key)),
+              React.createElement("td", { style: styles.td }, unavailable ? "未注册" : React.createElement("button", { style: styles.btn, onClick: () => testOne(m.key) }, "测"))
+            );
+          })];
         }))
       ),
       )
     );
 
-    const schemesPane = React.createElement("div", { style: styles.schemeBox },
+    const schemesPane = React.createElement("div", { style: { ...styles.schemeBox, maxHeight: "calc(100vh - 150px)", overflowY: "auto" } },
       React.createElement("div", { style: { fontWeight: 600, marginBottom: 8 } }, "方案与链路（当前激活：" + state.activeScheme + "）"),
       React.createElement("div", { style: { margin: "0 0 10px", padding: "10px 12px", background: "#eef6ee", border: "1px solid #cde6cd", borderRadius: 8, fontSize: 13 } },
         React.createElement("div", { style: { fontWeight: 600, marginBottom: 4 } }, "当前实际使用",
@@ -329,10 +402,10 @@
       name: "settings.section", id: "model-pool", order: 40, label: () => "模型池", locale: NS
     }, () => React.createElement(Section)));
 
-    // 左侧全局面板导航项（options.id 被 sidebar.panellist 读取）
+    // 左侧全局面板导航项（options.id 被 sidebar.panellist 读取，第二参数为图标组件）
     ctx.slots.inject("sidebar.panellist", () => ctx.slots.register({
       name: "sidebar.panellist", id: "model-pool", order: 50, label: () => "模型池"
-    }, () => null));
+    }, ModelPoolIcon));
 
     // 主区 keyed 面板（options.key 与 selectPanel 的 panelId 匹配）
     ctx.slots.inject("main", () => ctx.slots.register({
