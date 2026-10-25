@@ -115,6 +115,7 @@
     const [current, setCurrent] = useState(null); // 最近一次实际命中
     const [ctxInput, setCtxInput] = useState(null); // 上下文窗口输入中的原始字符串（null=用紧凑显示）
     const [coolInput, setCoolInput] = useState(null); // 失败冷却秒数输入中的原始字符串
+    const [chainTest, setChainTest] = useState(null); // 最近一次链路自检结果 {scheme,chain,results,testedAt}
 
     const loadModels = async (manual) => {
       if (manual) { setRefreshing(true); setNotice(null); }
@@ -182,7 +183,30 @@
       setBusy(false);
     };
 
-    // 内置排序方案
+    /**
+     * 链路自检：只测「当前激活方案」链上的条目，按链顺序返回。
+     * 和 testAll 的区别不只是范围——它走 /test-chain，能让运行时注册的渠道
+     * （qoder / trae / workbuddy4）经宿主运行时真发一次请求，而单模型 /test 只认配置行。
+     */
+    const testChain = async () => {
+      setBusy(true);
+      setNotice(null);
+      try {
+        const j = await api("/api/model-pool/test-chain", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
+        if (j.ok) {
+          const merged = { ...results, ...j.results };
+          setResults(merged);
+          setChainTest(j);
+          setLastTestAt(j.testedAt);
+          saveProbe(merged, j.testedAt);
+        } else {
+          setNotice(j.error || "链路自检失败");
+        }
+      } catch (e) {
+        setNotice(String(e?.message || e));
+      }
+      setBusy(false);
+    };
     const builtinRank = (kind) => {
       const sel = models.filter((m) => checked[m.key]);
       let arr = [...sel];
@@ -378,6 +402,24 @@
       )
     );
 
+    // 链路自检小结：只在「刚测过的方案」仍是当前激活方案时显示，切走就不误导
+    const chainSummary = (() => {
+      if (!chainTest || chainTest.scheme !== state.activeScheme) return null;
+      const list = Array.isArray(chainTest.chain) ? chainTest.chain : [];
+      const vals = list.map((k) => chainTest.results?.[k]).filter(Boolean);
+      const okN = vals.filter((v) => v.status === "ok").length;
+      const badN = vals.filter((v) => v.status === "fail").length;
+      const skipN = vals.filter((v) => v.status === "skip").length;
+      return React.createElement("div", { style: { marginBottom: 8, fontSize: 12, color: "#555" } },
+        `链路自检 ${list.length} 条：`,
+        React.createElement("b", { style: { color: "#12b76a" } }, `${okN} 可用`),
+        " / ",
+        React.createElement("b", { style: { color: badN > 0 ? "#f04438" : "#888" } }, `${badN} 不可用`),
+        skipN > 0 ? ` / ${skipN} 跳过` : "",
+        ` · ${new Date(chainTest.testedAt).toLocaleTimeString()}`
+      );
+    })();
+
     const schemesPane = React.createElement("div", { style: { ...styles.schemeBox, maxHeight: "calc(100vh - 150px)", overflowY: "auto" } },
       React.createElement("div", { style: { fontWeight: 600, marginBottom: 8 } }, "方案与链路（当前激活：" + state.activeScheme + "）"),
       React.createElement("div", { style: { margin: "0 0 10px", padding: "10px 12px", background: "#eef6ee", border: "1px solid #cde6cd", borderRadius: 8, fontSize: 13 } },
@@ -442,6 +484,7 @@
         React.createElement("select", { style: styles.select, value: state.activeScheme, onChange: (e) => switchScheme(e.target.value) },
           Object.keys(state.schemes || {}).map((n) => React.createElement("option", { key: n, value: n }, n))
         ),
+        React.createElement("button", { style: { ...styles.btn, ...styles.btnPrimary }, onClick: testChain, disabled: busy }, busy ? "自检中…" : "测试当前链路"),
         React.createElement("button", { style: styles.btn, onClick: () => saveScheme(state.activeScheme, builtinRank("tier")) }, "同档聚类重排"),
         React.createElement("button", { style: styles.btn, onClick: () => saveScheme(state.activeScheme, builtinRank("latency")) }, "延迟优先"),
         React.createElement("button", { style: styles.btn, onClick: () => saveScheme(state.activeScheme, builtinRank("free")) }, "免费优先"),
@@ -468,6 +511,7 @@
         React.createElement("button", { style: { ...styles.btn, ...styles.btnPrimary }, onClick: () => { if (newScheme) { saveScheme(newScheme, builtinRank("tier")); setNewScheme(""); } } }, "由勾选内容新建方案")
       ),
       React.createElement("div", { style: { margin: "10px 0 6px", color: "#666" } }, "当前链（" + activeChain.length + "），拖拽手柄调整顺序："),
+      chainSummary,
       activeChain.map((c, i) => React.createElement("div", {
         key: i, draggable: true,
         onDragStart: onDragStart(i), onDragOver: onDragOverItem, onDrop: onDropItem(i),
@@ -476,6 +520,13 @@
         React.createElement("span", { style: styles.dragHandle }, "⠿"),
         React.createElement("span", { style: { color: "#999", width: 22 } }, i + 1),
         React.createElement("span", null, friendlyChain(c)),
+        (() => {
+          const r = results[c];
+          if (!r) return null;
+          const col = r.status === "ok" ? "#12b76a" : r.status === "skip" ? "#98a2b3" : "#f04438";
+          const label = r.status === "ok" ? `${r.latency}ms` : r.status === "skip" ? "跳过" : "失败";
+          return React.createElement("span", { style: { marginLeft: 8, fontSize: 12, color: col }, title: r.error || "" }, `● ${label}`);
+        })(),
         React.createElement("button", { style: styles.removeBtn, onClick: () => removeChainItem(i) }, "移除")
       ))
     );

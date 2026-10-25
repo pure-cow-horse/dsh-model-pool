@@ -248,6 +248,56 @@ async function probeDirect(baseURL, apiKey, modelId) {
     return { status: "fail", latency: Date.now() - start, code: classifyFailure(0, e, ""), error: e?.name === "AbortError" ? `超时（${PROBE_TIMEOUT_MS / 1e3}s）` : e?.message || String(e) };
   } finally { clearTimeout(timer); }
 }
+
+/**
+ * 经宿主运行时探测——给「运行时注册的渠道」用（qoder / trae / workbuddy4 等）。
+ * 这些渠道没有 baseURL + apiKeyEnv 可以直连，但 `llm.stream` 走的是它们自己的
+ * 适配器（协议、端点、凭据、重试全由宿主负责），所以这才是不带假阴性的口径。
+ * 计时到首个产出块为止；maxTokens=1，拿到 finish 就结束。
+ */
+async function probeViaRuntime(llm, provider, model) {
+  if (!llm || typeof llm.stream !== "function") {
+    return { status: "skip", latency: 0, error: "宿主 llm 运行时不可用" };
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
+  const start = Date.now();
+  try {
+    const stream = llm.stream({
+      provider,
+      model,
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      maxTokens: 1,
+      signal: controller.signal
+    });
+    if (!stream || typeof stream[Symbol.asyncIterator] !== "function") {
+      return { status: "fail", latency: 0, error: `provider ${provider} 未注册 adapter` };
+    }
+    let first = 0;
+    for await (const chunk of stream) {
+      if (chunk && chunk.type === "finish") {
+        const kind = chunk.reason?.kind;
+        if (kind === "error" || kind === "aborted") {
+          return {
+            status: "fail",
+            latency: Date.now() - start,
+            code: chunk.reason?.failure?.code || "ERROR",
+            error: describeFailure(chunk.reason?.failure, `${provider}/${model}`)
+          };
+        }
+        return { status: "ok", latency: first || Date.now() - start };
+      }
+      if (!first && chunk && chunk.type !== "usage") first = Date.now() - start;
+    }
+    return { status: "fail", latency: Date.now() - start, error: "流提前结束（未收到 finish）" };
+  } catch (e) {
+    return {
+      status: "fail",
+      latency: Date.now() - start,
+      error: e?.name === "AbortError" ? `超时（${PROBE_TIMEOUT_MS / 1e3}s）` : e?.message || String(e)
+    };
+  } finally { clearTimeout(timer); }
+}
 //#endregion
 
 //#region 方案 / 链持久化（profile.dir/model-pool.json）
@@ -790,6 +840,54 @@ function apply(ctx) {
       if (!apiKey) return sendJson(res, 200, { ok: true, key, status: "fail", code: "AUTH", error: `未配置 ${p.apiKeyEnv} 的 Key` });
       const r = await probeDirect(p.baseURL, apiKey, modelId);
       sendJson(res, 200, { ok: true, key, ...r });
+    }
+  });
+
+  // POST /api/model-pool/test-chain { scheme?, concurrency? } —— 只测当前（或指定）方案的链路
+  // 与上面的单模型测试分开，是因为链路里常常混着运行时注册的渠道（qoder / trae /
+  // workbuddy4），它们没有 baseURL + Key 可直连，只能经宿主 `llm.stream` 才算得准。
+  reg({
+    kind: "exact",
+    path: "/api/model-pool/test-chain",
+    handler: async (req, res) => {
+      if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "只接受 POST" });
+      if (!isLocalOrigin(req)) return sendJson(res, 403, { ok: false, error: "拒绝非本地来源" });
+      let body = {};
+      try { body = await readJsonBody(req); } catch (e) { return sendJson(res, 400, { ok: false, error: e.message }); }
+      const st = readState(profile);
+      const schemeName = body.scheme || st.activeScheme;
+      const chain = Array.isArray(st.schemes?.[schemeName]?.chain) ? st.schemes[schemeName].chain : [];
+      if (chain.length === 0) {
+        return sendJson(res, 200, { ok: true, scheme: schemeName, chain: [], results: {}, testedAt: Date.now() });
+      }
+      const cfg = readSettingsCached(profile);
+      const rows = providerRows(cfg);
+      const getLlm = () => llm || ctx.get("llm");
+      const results = {};
+      const conc = Math.max(1, Math.min(Number(body.concurrency) || 4, 8));
+      for (let i = 0; i < chain.length; i += conc) {
+        await Promise.all(chain.slice(i, i + conc).map(async (entry) => {
+          const slash = String(entry).indexOf("/");
+          const provider = slash > 0 ? String(entry).slice(0, slash) : String(entry);
+          const modelId = slash > 0 ? String(entry).slice(slash + 1) : "";
+          const p = rows.find((x) => x.provider === provider);
+          try {
+            if (p && p.baseURL && (p.api === "openai-completions" || p.api === "deepseek")) {
+              const apiKey = p.apiKeyEnv ? (await credentials.resolve(p.apiKeyEnv))?.value : "";
+              if (p.apiKeyEnv && !apiKey) {
+                results[entry] = { status: "fail", latency: 0, code: "AUTH", channel: "direct", error: `未配置 ${p.apiKeyEnv} 的 Key` };
+              } else {
+                results[entry] = { ...(await probeDirect(p.baseURL, apiKey, modelId)), channel: "direct" };
+              }
+            } else {
+              results[entry] = { ...(await probeViaRuntime(getLlm(), provider, modelId)), channel: "runtime" };
+            }
+          } catch (e) {
+            results[entry] = { status: "fail", latency: 0, channel: "error", error: e?.message || String(e) };
+          }
+        }));
+      }
+      sendJson(res, 200, { ok: true, scheme: schemeName, chain, results, testedAt: Date.now() });
     }
   });
 

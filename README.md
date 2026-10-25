@@ -19,6 +19,7 @@ DeepSeek Harness（DSH）插件：在一个面板里探测各供应商可用模�
 - **由勾选内容新建方案**：用勾选集合另存为新方案。
 - 内置排序（整体替换当前链）：同档聚类、延迟优先、免费优先。
 - 链上项目支持拖拽排序、单项移除、切换激活方案。
+- **测试当前链路**：只测当前激活方案链上的模型（不碰整张清单），按链顺序返回可用/不可用/跳过与延迟，链上每条后面直接显示状态点和耗时。配置渠道直连探测，运行时注册的渠道（qoder / trae / workbuddy4）经宿主运行时探测——后者没有 baseURL + Key 可直连，走 `llm.stream` 才是准的。
 
 ### 故障转移引擎（虚拟 provider：ModelPool）
 - 模型选择器中每个方案显示为一个可选虚拟模型；`Auto` 跟随面板当前激活方案。
@@ -63,13 +64,18 @@ node probes/verify-tool-call-output.mjs                              # 测本仓
 POOL_PROBE_TARGET=installed node probes/verify-tool-call-output.mjs  # 测 profile 里跑着的那份
 node probes/verify-unsupported-effort-skip.mjs                       # 同上双目标，加 POOL_PROBE_TARGET=installed
 node probes/verify-error-reporting.mjs                               # 失败原因 + 冷却配置，同上双目标
+node probes/verify-test-chain.mjs                                    # 链路自检路由，同上双目标
 ```
-三个探针共 31 项断言：
+四个探针共 45 项断言：
 - **verify-tool-call-output**（8）：正文文本算产出；**纯工具调用回合算产出**（`tool-call-delta` / `block-end(type=tool-call|tool-result)`）；
   只有 `reasoning-delta` 仍判空流；全空流与无产出的错误 finish 文案不变；产出块原样透传。
 - **verify-unsupported-effort-skip**（6）：渠道明确拒绝过的 reasoning 档位记 10 分钟，期间直接走默认档
   （方案固定 effort=medium 而目录只有 high/max/low 时，旧行为每回合白跑一趟——2026-10-24 实测 270 次/天）；
   TTL 过期自愈，档位被接受时清记忆。
+- **verify-error-reporting**（17）：中途断流记 midStream + 真实原因并写冷却；空 failure 有兜底文案，
+  `error` 不再可能为 null；冷却默认 60 秒、可配、5 秒～1 小时 clamp；POST 能持久化、GET 能读回。
+- **verify-test-chain**（14）：链路自检只测链上条目且保持顺序；配置渠道走直连、运行时渠道走
+  `llm.stream`；运行时错误块判 fail 且原因带 code；GET 405、跨域 403、空链不报错。
 
 > 2026-10-24 修复记录：旧判定只认正文文本，**只发起工具调用、不带开场白**的合法 agent 回合
 > 被判「返回空流（无可见正文）」并冷却渠道 1 分钟（当天全日志 728 次，qoder-cn 63 次、
