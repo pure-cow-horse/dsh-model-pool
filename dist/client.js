@@ -40,6 +40,26 @@
     return "other";
   }
 
+  // 上下文窗口：数字 <-> 紧凑显示（128k / 1m）
+  function fmtCtx(n) {
+    n = Number(n);
+    if (!n || n <= 0) return "";
+    if (n >= 1e6) { const v = n / 1e6; return (Number.isInteger(v) ? v : v.toFixed(1)) + "m"; }
+    if (n >= 1e3) { const v = n / 1e3; return (Number.isInteger(v) ? v : v.toFixed(1)) + "k"; }
+    return String(n);
+  }
+  function parseCtx(s) {
+    s = String(s || "").trim().toLowerCase().replace(/[\s,]/g, "");
+    if (!s) return 0;
+    const m = s.match(/^([\d.]+)\s*([km]?)$/);
+    if (!m) return 0;
+    let v = parseFloat(m[1]);
+    if (!isFinite(v)) return 0;
+    if (m[2] === "k") v *= 1e3;
+    if (m[2] === "m") v *= 1e6;
+    return Math.floor(v);
+  }
+
   const styles = {
     wrap: { padding: 16, fontSize: 13, color: "var(--dsw-alias-label-primary,#333)" },
     toolbar: { display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 12 },
@@ -93,6 +113,8 @@
     const [tab, setTab] = useState("models"); // models / schemes
     const dragRef = useRef(null); // 当前拖拽的链下标
     const [current, setCurrent] = useState(null); // 最近一次实际命中
+    const [ctxInput, setCtxInput] = useState(null); // 上下文窗口输入中的原始字符串（null=用紧凑显示）
+    const [coolInput, setCoolInput] = useState(null); // 失败冷却秒数输入中的原始字符串
 
     const loadModels = async (manual) => {
       if (manual) { setRefreshing(true); setNotice(null); }
@@ -172,7 +194,7 @@
 
     const saveScheme = async (name, chain) => {
       const schemes = { ...(state.schemes || {}) };
-      schemes[name] = { builtin: name === "default" ? "tier" : undefined, chain };
+      schemes[name] = { ...(schemes[name] || {}), builtin: name === "default" ? "tier" : undefined, chain };
       const next = { ...state, schemes, activeScheme: name };
       await api("/api/model-pool/chain", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ schemes, activeScheme: name }) });
       setState(next);
@@ -236,6 +258,38 @@
     const providers = [...new Set(models.map((m) => m.provider))];
     const families = [...new Set(models.map((m) => familyOf(m.modelId)))];
     const activeChain = state.schemes?.[state.activeScheme]?.chain || [];
+
+    // provider/modelId → 友好显示名映射（来自模型目录），链条与当前命中不再裸露原始 id
+    const modelByKey = {};
+    const providerName = {};
+    const nameCount = {};
+    for (const m of models) {
+      modelByKey[m.key] = m;
+      if (!providerName[m.provider]) providerName[m.provider] = m.displayName;
+      const nk = m.provider + "||" + (m.modelName || m.modelId);
+      nameCount[nk] = (nameCount[nk] || 0) + 1;
+    }
+    // 同一供应商下模型名重复时（如普通版与 -sg 版 catalog 同名），直接用 modelId 区分，去掉重复大名
+    const modelLabel = (row) => {
+      const label = row.modelName || row.modelId;
+      const dup = (nameCount[row.provider + "||" + label] || 0) > 1;
+      return dup ? row.modelId : label;
+    };
+    const friendlyChain = (c) => {
+      const row = modelByKey[c];
+      if (row) return `${row.displayName} / ${modelLabel(row)}`;
+      const idx = String(c).indexOf("/");
+      if (idx > 0) {
+        const pv = c.slice(0, idx), rest = c.slice(idx + 1);
+        return `${providerName[pv] || pv} / ${rest}`;
+      }
+      return c;
+    };
+    const friendlyProvider = (id) => providerName[id] || id;
+    const friendlyModel = (provider, modelId) => {
+      const row = modelByKey[`${provider}/${modelId}`];
+      return row ? (row.modelName || modelId) : modelId;
+    };
 
     const switchScheme = async (name) => {
       await api("/api/model-pool/chain", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ activeScheme: name }) });
@@ -331,10 +385,58 @@
           React.createElement("button", { style: { ...styles.btn, marginLeft: 8 }, onClick: loadCurrent }, "刷新")),
         current?.lastUse
           ? React.createElement("div", null,
-              React.createElement("div", null, "供应商：", React.createElement("b", null, current.lastUse.provider), "　模型：", React.createElement("b", null, current.lastUse.model)),
+              React.createElement("div", null, "供应商：", React.createElement("b", null, friendlyProvider(current.lastUse.provider)), "　模型：", React.createElement("b", null, friendlyModel(current.lastUse.provider, current.lastUse.model))),
               React.createElement("div", { style: { color: "#666", marginTop: 2 } }, `方案 ${current.lastUse.scheme} · 尝试 ${current.lastUse.attempts} 条 · ${new Date(current.lastUse.at).toLocaleTimeString()}`)
             )
-          : React.createElement("div", { style: { color: "#888" } }, "尚未通过模型池发起请求")
+          : React.createElement("div", { style: { color: "#888" } }, "尚未通过模型池发起请求"),
+        current && Array.isArray(current.attempts) && current.attempts.some((a) => !a.ok)
+          ? React.createElement("div", { style: { marginTop: 8, paddingTop: 6, borderTop: "1px dashed #cde6cd" } },
+              React.createElement("div", { style: { fontWeight: 600, color: "#a15c00", marginBottom: 2 } }, "本次失败/跳过的渠道"),
+              current.attempts.filter((a) => !a.ok).slice(-3).map((a, i) =>
+                React.createElement("div", { key: "att" + i, style: { fontSize: 12, color: "#a15c00" } },
+                  `${a.entry}${a.skipped ? "（跳过）" : a.midStream ? "（中途断流）" : ""}：${a.error || "未记录原因"}`)
+              )
+            )
+          : null,
+        current && Array.isArray(current.cooling) && current.cooling.length > 0
+          ? React.createElement("div", { style: { marginTop: 6, fontSize: 12, color: "#666" } },
+              "冷却中：" + current.cooling.map((x) => `${x.entry}（剩 ${Math.ceil(x.remainingMs / 1000)}s）`).join("、"))
+          : null
+      ),
+      React.createElement("div", { style: { ...styles.toolbar, marginBottom: 10 } },
+        React.createElement("span", { style: { fontSize: 13, color: "#555" } }, "上下文窗口（token）："),
+        React.createElement("input", {
+          style: { ...styles.select, width: 140 },
+          type: "text",
+          placeholder: "如 128k / 1m",
+          value: ctxInput !== null ? ctxInput : fmtCtx(state.contextWindow),
+          onChange: (e) => setCtxInput(e.target.value),
+          onBlur: () => {
+            const v = parseCtx(ctxInput !== null ? ctxInput : state.contextWindow);
+            setCtxInput(null);
+            api("/api/model-pool/chain", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contextWindow: v }) }).then(loadState);
+          }
+        }),
+        React.createElement("span", { style: { fontSize: 12, color: "#999" } }, "留空=跟随模型默认；支持 k/m 单位，如 128k、0.5m"),
+        React.createElement("span", { style: { fontSize: 13, color: "#555", marginLeft: 10 } }, "失败冷却（秒）："),
+        React.createElement("input", {
+          style: { ...styles.select, width: 84 },
+          type: "text",
+          inputMode: "numeric",
+          placeholder: "60",
+          title: "失败渠道在这段时间内不参与顺延，5～3600 秒",
+          value: coolInput !== null ? coolInput : String(Math.round((state.cooldownMs ?? 60000) / 1000)),
+          onChange: (e) => setCoolInput(e.target.value),
+          onBlur: () => {
+            const raw = coolInput !== null ? coolInput : String((state.cooldownMs ?? 60000) / 1000);
+            setCoolInput(null);
+            const sec = Number(String(raw).trim());
+            if (!Number.isFinite(sec) || sec <= 0) return; // 非法输入不写，直接回显原值
+            const clamped = Math.min(Math.max(Math.round(sec), 5), 3600);
+            api("/api/model-pool/chain", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cooldownMs: clamped * 1000 }) }).then(loadState);
+          }
+        }),
+        React.createElement("span", { style: { fontSize: 12, color: "#999" } }, "失败渠道在此期间不参与顺延")
       ),
       React.createElement("div", { style: styles.toolbar },
         React.createElement("select", { style: styles.select, value: state.activeScheme, onChange: (e) => switchScheme(e.target.value) },
@@ -343,7 +445,23 @@
         React.createElement("button", { style: styles.btn, onClick: () => saveScheme(state.activeScheme, builtinRank("tier")) }, "同档聚类重排"),
         React.createElement("button", { style: styles.btn, onClick: () => saveScheme(state.activeScheme, builtinRank("latency")) }, "延迟优先"),
         React.createElement("button", { style: styles.btn, onClick: () => saveScheme(state.activeScheme, builtinRank("free")) }, "免费优先"),
-        React.createElement("button", { style: { ...styles.btn, ...styles.btnPrimary }, onClick: addCheckedToScheme }, "+ 勾选加入当前方案")
+        React.createElement("button", { style: { ...styles.btn, ...styles.btnPrimary }, onClick: addCheckedToScheme }, "+ 勾选加入当前方案"),
+        React.createElement("select", {
+          style: styles.select,
+          title: "本方案统一思考强度；降级换供应商时强度保持一致",
+          value: state.schemes?.[state.activeScheme]?.effort || "",
+          onChange: (e) => {
+            const schemes = { ...(state.schemes || {}) };
+            schemes[state.activeScheme] = { ...(schemes[state.activeScheme] || {}), effort: e.target.value };
+            api("/api/model-pool/chain", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ schemes, activeScheme: state.activeScheme }) }).then(loadState);
+          }
+        },
+          React.createElement("option", { value: "" }, "思考强度：跟随宿主"),
+          React.createElement("option", { value: "minimal" }, "关闭/最低"),
+          React.createElement("option", { value: "low" }, "低"),
+          React.createElement("option", { value: "medium" }, "中"),
+          React.createElement("option", { value: "high" }, "高")
+        )
       ),
       React.createElement("div", { style: styles.toolbar },
         React.createElement("input", { style: { ...styles.select, width: 180 }, placeholder: "新方案名，如 纯 deepseek", value: newScheme, onChange: (e) => setNewScheme(e.target.value) }),
@@ -357,7 +475,7 @@
       },
         React.createElement("span", { style: styles.dragHandle }, "⠿"),
         React.createElement("span", { style: { color: "#999", width: 22 } }, i + 1),
-        React.createElement("span", null, c),
+        React.createElement("span", null, friendlyChain(c)),
         React.createElement("button", { style: styles.removeBtn, onClick: () => removeChainItem(i) }, "移除")
       ))
     );
@@ -368,16 +486,32 @@
     );
   }
 
-  // 对话输入框模型名旁：仅当选中 ModelPool 方案时，追加显示实际命中的供应商/模型
+  // 对话输入框模型名旁：仅当选中 ModelPool 方案时，追加显示实际命中的供应商/模型 + 紧凑思考强度切换
   function PoolLabel(props) {
     const { useState, useEffect } = getReact();
     const [use, setUse] = useState(null);
+    const [byKey, setByKey] = useState({});
+    const [scheme, setScheme] = useState(null);
     useEffect(() => {
       let alive = true;
       const load = async () => {
         try {
-          const j = await fetch("/api/model-pool/current").then((r) => r.json());
-          if (alive && j.ok) setUse(j.status?.lastUse || null);
+          const [cj, mj, ch] = await Promise.all([
+            fetch("/api/model-pool/current").then((r) => r.json()).catch(() => null),
+            fetch("/api/model-pool/models").then((r) => r.json()).catch(() => null),
+            fetch("/api/model-pool/chain").then((r) => r.json()).catch(() => null)
+          ]);
+          if (!alive) return;
+          if (cj && cj.ok) setUse(cj.status?.lastUse || null);
+          const map = {};
+          if (mj && mj.ok && Array.isArray(mj.models)) {
+            for (const row of mj.models) map[row.key] = row;
+          }
+          setByKey(map);
+          if (ch && ch.ok) {
+            const sn = ch.state?.activeScheme;
+            setScheme({ name: sn, effort: ch.state?.schemes?.[sn]?.effort || "" });
+          }
         } catch { /* 忽略 */ }
       };
       load();
@@ -386,13 +520,51 @@
     }, []);
     const name = props?.model?.name || "";
     const isPool = props?.provider?.id === "ModelPool" || props?.model?.provider === "ModelPool";
-    // 非 ModelPool：原样返回；展开菜单(menu/option)：显示方案原名；
-    // 闭合按钮(trigger)且已有命中：直接替换为实际渠道 provider/model，未发起过则回退原名
     if (!isPool) return React.createElement("span", null, name);
-    if (props?.placement === "trigger" && props?.selected && use) {
-      return React.createElement("span", null, `${use.provider}/${use.model}`);
-    }
-    return React.createElement("span", null, name);
+
+    const effortSelect = React.createElement("select", {
+      value: scheme?.effort || "",
+      title: "本方案思考强度（降级换供应商时保持一致）",
+      style: { fontSize: 12, marginLeft: 8, padding: "1px 4px", border: "1px solid #d0d7de", borderRadius: 6, background: "transparent", cursor: "pointer", verticalAlign: "middle", pointerEvents: "auto" },
+      onMouseDown: (e) => e.stopPropagation(),
+      onClick: (e) => e.stopPropagation(),
+      onKeyDown: (e) => e.stopPropagation(),
+      onFocus: (e) => e.stopPropagation(),
+      onChange: async (e) => {
+        e.stopPropagation();
+        const v = e.target.value;
+        setScheme((s) => ({ ...(s || { name: "" }), effort: v }));
+        try {
+          const cur = await fetch("/api/model-pool/chain").then((r) => r.json());
+          if (cur.ok) {
+            const schemes = { ...(cur.state?.schemes || {}) };
+            const sn = cur.state?.activeScheme;
+            schemes[sn] = { ...(schemes[sn] || {}), effort: v };
+            await fetch("/api/model-pool/chain", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ schemes, activeScheme: sn }) });
+          }
+        } catch { /* 忽略 */ }
+      }
+    },
+      React.createElement("option", { value: "" }, "自动"),
+      React.createElement("option", { value: "minimal" }, "关"),
+      React.createElement("option", { value: "low" }, "低"),
+      React.createElement("option", { value: "medium" }, "中"),
+      React.createElement("option", { value: "high" }, "高")
+    );
+
+    // 展开菜单(menu/option)：保持方案项原样，不放切换器
+    if (props?.placement !== "trigger" || !props?.selected) return React.createElement("span", null, name);
+
+    // 闭合按钮(trigger)：实际命中标签 + 思考强度切换
+    const label = use
+      ? (() => {
+          const row = byKey[`${use.provider}/${use.model}`];
+          const pv = row ? row.displayName : use.provider;
+          const md = row ? (row.modelName || use.model) : use.model;
+          return `${pv} / ${md}`;
+        })()
+      : name;
+    return React.createElement("span", null, label, effortSelect);
   }
 
   const inject = ["slots", "locale"];

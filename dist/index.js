@@ -23,6 +23,37 @@ function dshHome() {
   return process.env.DSH_HOME || join(homedir(), ".dsh");
 }
 
+// 渠道中心（dsh-workbuddy-trae-qoder-connect）内置默认名，与该插件 DEFAULT_REGISTRY_CHANNELS 对齐；
+// 用户在面板改的名写在 $DSH_HOME/connect-channels.json，读取后覆盖这些默认值。
+const DEFAULT_CHANNEL_NAMES = {
+  workbuddy1: "WorkBuddy 国内",
+  workbuddy2: "WorkBuddy 国内 2",
+  workbuddy3: "WorkBuddy 企业版",
+  workbuddy4: "WorkBuddy 国际",
+  trae: "Trae",
+  "qoder-cn": "Qoder 国内版",
+  qoder: "Qoder 国际版"
+};
+
+// 读渠道中心注册表 {version, channels:[{id,displayName}]}，返回 providerId → 最新显示名；
+// 文件缺失/损坏时回退内置默认表，保证改名即时跟随、无需重启 DSH。
+function readChannelNameMap() {
+  const map = new Map(Object.entries(DEFAULT_CHANNEL_NAMES));
+  try {
+    const fp = join(dshHome(), "connect-channels.json");
+    if (existsSync(fp)) {
+      const j = JSON.parse(readFileSync(fp, "utf8"));
+      const channels = Array.isArray(j && j.channels) ? j.channels : [];
+      for (const ch of channels) {
+        if (ch && typeof ch.id === "string" && typeof ch.displayName === "string" && ch.displayName.trim()) {
+          map.set(ch.id, ch.displayName.trim());
+        }
+      }
+    }
+  } catch { /* 注册表读不出就用内置默认 */ }
+  return map;
+}
+
 function parseSettingsContent(raw) {
   const doc = loadYAML(raw, { schema: LooseSchema });
   const cfg = {};
@@ -280,6 +311,21 @@ let __poolDiag = () => {};
 const POOL_PROVIDER = "ModelPool";
 const POOL_MODEL = "Auto";
 
+/**
+ * 把错误块里的 failure 压成一行人话。
+ * 上游有时只给一个空的 reason（code/message/status 全无），旧代码这时会留下
+ * `error: null`，面板上就是一个查不出原因的哑失败——所以这里必须有兜底文案。
+ */
+function describeFailure(fail, prefix) {
+  const parts = [];
+  if (fail && fail.code) parts.push(String(fail.code));
+  if (fail && fail.status != null) parts.push(`HTTP ${fail.status}`);
+  const msg = fail && typeof fail.message === "string" ? fail.message.trim() : "";
+  if (msg) parts.push(msg.slice(0, 160));
+  return `${prefix} ${parts.join(" ") || "错误块未附带原因（上游直接断开）"}`;
+}
+
+
 class PoolAdapter {
   constructor(readStateFn, getLlm) {
     this.readState = readStateFn;
@@ -288,6 +334,18 @@ class PoolAdapter {
     this.lastUse = null;       // 最近一次成功命中 {scheme,provider,model,entry,at,attempts}
     this.attempts = [];        // 最近一次调用的逐条尝试记录
     this.registered = new Set(); // 宿主当前已注册 adapter 的 provider id 缓存；空=未知，不硬过滤
+    // entry → { effort, until }：该渠道明确拒绝过的 reasoning 档位，10 分钟内直接跳过
+    this.effortUnsupported = new Map();
+    this.EFFORT_UNSUPPORTED_TTL_MS = 10 * 60 * 1000;
+  }
+  /**
+   * 冷却时长：`state.cooldownMs` 可配，默认 60 秒（旧版两处都写死 60s，README 却写 300s）。
+   * 下限 5 秒——填 0 会让失败渠道立刻回到链头反复撞墙；上限 1 小时。
+   */
+  _cooldownMs() {
+    const raw = Number(this.readState()?.cooldownMs);
+    if (!Number.isFinite(raw) || raw <= 0) return 60 * 1000;
+    return Math.min(Math.max(raw, 5 * 1000), 3600 * 1000);
   }
   providerInfo(provider) { return { id: provider, name: "ModelPool" }; }
   // 虚拟模型 id 即方案名；Auto 跟随当前激活方案
@@ -302,7 +360,7 @@ class PoolAdapter {
     const s = this.readState();
     const name = this._schemeOf(model);
     const sc = name ? s.schemes?.[name] : null;
-    return { name, chain: Array.isArray(sc?.chain) ? sc.chain : [] };
+    return { name, chain: Array.isArray(sc?.chain) ? sc.chain : [], effort: sc?.effort || "" };
   }
   _parseEntry(entry) {
     if (!entry) return null;
@@ -325,12 +383,16 @@ class PoolAdapter {
     if (head && llm?.resolveModelInfo) {
       try {
         const info = await llm.resolveModelInfo(head.provider, head.model, signal);
+        const s = this.readState();
+        const ctxWin = Number(s.contextWindow);
+        let ctx = info.context;
+        if (ctxWin > 0) ctx = { ...(ctx || {}), contextWindow: ctxWin }; // 用户设置覆盖模型默认上下文窗口
         return {
           provider,
           id: model,
           name: `ModelPool / ${model}`,
           ...(info.inputModalities ? { inputModalities: info.inputModalities } : {}),
-          ...(info.context ? { context: info.context } : {}),
+          ...(ctx ? { context: ctx } : {}),
           ...(info.defaultMaxTokens !== undefined ? { defaultMaxTokens: info.defaultMaxTokens } : {})
         };
       } catch { /* 回退到简化返回 */ }
@@ -378,8 +440,8 @@ class PoolAdapter {
   }
   async *stream(options) {
     const llm = this.getLlm();
-    const { name: schemeName, chain } = this._chainOf(options?.model);
-    __poolDiag(`[stream] enter model=${options?.model} scheme=${schemeName} chain=${chain.length}`);
+    const { name: schemeName, chain, effort } = this._chainOf(options?.model);
+    __poolDiag(`[stream] enter model=${options?.model} scheme=${schemeName} chain=${chain.length} effort=${effort || "(跟随宿主)"}`);
     if (!llm) throw new Error("ModelPool: llm 运行时不可用");
     if (chain.length === 0) throw new Error(`ModelPool: 方案「${schemeName || "未命名"}」链路为空，请在面板勾选模型并保存`);
     const now = Date.now();
@@ -389,29 +451,117 @@ class PoolAdapter {
       const [provider, ...rest] = entry.split("/");
       return { provider, model: rest.join("/"), entry };
     }).filter((c) => (this.cooldown.get(c.entry) || 0) <= now);
+    __poolDiag(`[stream] 候选=${candidates.length} 冷却剔除=${chain.length - candidates.length} 顺序=${candidates.map((x) => x.entry).join(" | ")}`);
     let lastError;
     for (const c of candidates) {
       const attempt = { entry: c.entry, provider: c.provider, model: c.model, at: now, ok: false, error: null, skipped: false };
       this.attempts.push(attempt);
+      __poolDiag(`[stream] 尝试 ${c.entry}`);
       // 已注册集合非空时，跳过宿主未注册 adapter 的 provider（如停用对接插件后的 workbuddy/workbuddy-ai）
       if (this.registered.size && !this.registered.has(c.provider)) {
         attempt.skipped = true;
         attempt.error = "宿主未注册该 provider 的 adapter";
-        this.cooldown.set(c.entry, now + 300000);
+        // 结构性缺失，不写冷却：每次由 registered 实时判断，插件重新启用后立即恢复
         continue;
       }
-      try {
-        const inner = llm.stream({ ...options, provider: c.provider, model: c.model });
-        // 防御：候选渠道返回非 async iterable 时，记录类型并顺延，避免直接抛 "is not a function"
-        if (!inner || typeof inner[Symbol.asyncIterator] !== "function") {
-          __poolDiag(`[stream] 候选 ${c.entry} 返回非流 typeof=${typeof inner} value=${String(inner).slice(0, 120)}`);
-          throw new Error(`候选 ${c.entry} 返回非 async iterable（${typeof inner}）`);
+      // 第一次按方案指定强度尝试；若该渠道明确不支持此强度，自动去掉强度用其默认模式重试一次，避免误降级。
+      // 已知不支持的档位先记下来（entry → {effort, until}，10 分钟过期）：方案固定
+      // effort=medium 而渠道目录只有 high/max/low 时，**每一回合**都要先吃一次本地
+      // 拒绝再回落（2026-10-24 实测 270 次/天），记住后直接走默认档，省掉那次空跑。
+      const blockedEffort = this.effortUnsupported.get(c.entry);
+      const effortBlocked = effort !== "" && blockedEffort !== void 0 && blockedEffort.effort === effort && now < blockedEffort.until;
+      let variants = effort ? [effort, ""] : [""];
+      if (effortBlocked) {
+        variants = [""];
+        __poolDiag(`[stream] ${c.entry} 跳过已知不支持的 effort=${effort}（${Math.ceil((blockedEffort.until - now) / 1000)}s 后重试），直接用渠道默认`);
+      }
+      let variantErr = null;
+      let usedVariant = null;
+      for (let vi = 0; vi < variants.length; vi++) {
+        const v = variants[vi];
+        try {
+          __poolDiag(`[stream] ${c.entry} 尝试变体 effort=${v || "(渠道默认)"}`);
+          let yieldedAny = false;
+          for await (const chunk of this._attemptStream(c, options, v, attempt, schemeName, now)) {
+            yieldedAny = true;
+            yield chunk;
+          }
+          usedVariant = v;
+          // 这条 (渠道, 档位) 组合这次被接受了：清掉旧记忆，目录更新后立即恢复尝试
+          if (v === effort && effort !== "") this.effortUnsupported.delete(c.entry);
+          break; // 成功
+        } catch (e) {
+          variantErr = e;
+          const msg = e?.message || String(e);
+          const unsupported = /UNSUPPORTED_REASONING_EFFORT|does not support reasoning effort/i.test(msg);
+          // 不支持当前强度且还有"去掉强度"这一备选：换变体重试，不冷却
+          if (unsupported && v === effort && effort) {
+            this.effortUnsupported.set(c.entry, { effort, until: now + this.EFFORT_UNSUPPORTED_TTL_MS });
+            __poolDiag(`[stream] ${c.entry} 不支持 effort=${effort}，回落该渠道默认模式重试（${Math.round(this.EFFORT_UNSUPPORTED_TTL_MS / 1000)}s 内不再尝试该档位）`);
+            continue;
+          }
+          break; // 其他错误或已试完备选：退出变体循环，走顺延
         }
-        const it = inner[Symbol.asyncIterator]();
-        // 首帧探测：同步构造错误与首帧错误（NO_ADAPTER / 鉴权 / 限流）都在此抛出，失败即顺延
-        const first = await it.next();
+      }
+      if (usedVariant !== null) {
+        return; // 任一变体成功，整条链路结束
+      }
+      // 全部变体都失败
+      lastError = variantErr;
+      attempt.error = variantErr?.message || String(variantErr);
+      __poolDiag(`[stream] 候选 ${c.entry} 失败: ${variantErr?.message}\n${variantErr?.stack || ""}`);
+      this.cooldown.set(c.entry, now + this._cooldownMs()); // 发起级失败：按配置冷却，到期回到链头
+      continue;
+    }
+    __poolDiag(`[stream] 全部候选失败 lastError=${lastError?.message}`);
+    throw lastError || new Error("ModelPool: 链上所有渠道均不可用");
+  }
+  // 对单条候选发起一次流式请求；effort 为空则不注入 reasoningEffort
+  async *_attemptStream(c, options, effort, attempt, schemeName, now) {
+    const llm = this.getLlm();
+    const fwd = { ...options };
+    if (effort) fwd.reasoningEffort = effort;
+    const inner = llm.stream({ ...fwd, provider: c.provider, model: c.model });
+    if (!inner || typeof inner[Symbol.asyncIterator] !== "function") {
+      throw new Error(`候选 ${c.entry} 返回非 async iterable（${typeof inner}）`);
+    }
+    const it = inner[Symbol.asyncIterator]();
+    const isErrFinish = (ch) => ch && ch.type === "finish" && ch.reason?.kind === "error";
+    // 有产出 = 正文文本 **或** 工具调用。纯工具调用的回合没有正文，但它显然不是
+    // "渠道死了"：把工具调用排除在外，会让合法的 agent 回合被判空流、渠道还被
+    // 冷却 1 分钟（2026-10-24 实测：qoder-cn 一天被这样误杀 63 次，全日志 728 次，
+    // workbuddy4/trae 同样中招）。chunk 类型名对照 dsh-llm：工具调用走
+    // `tool-call-delta`，收尾是 `block-end` + `block.type === "tool-call"`；
+    // reasoning 不算产出——只在思考中出字的渠道仍应被判失败，否则用户会看到
+    // 一个没有答案的"成功"回合。
+    const hasOutput = (ch) =>
+      (ch.type === "text-delta" && /\S/.test(ch.text || "")) ||
+      (ch.type === "block-end" && ch.block?.type === "text" && /\S/.test(ch.block.text || "")) ||
+      ch.type === "tool-call-delta" ||
+      (ch.type === "block-end" && (ch.block?.type === "tool-call" || ch.block?.type === "tool-result"));
+    let seen = false;
+    let cur = await it.next();
+    while (!cur.done) {
+      const chunk = cur.value;
+      if (isErrFinish(chunk)) {
+        const fail = chunk.reason?.failure;
+        __poolDiag(`[stream] ${c.entry} 错误块 code=${fail?.code || ""} seen=${seen} msg=${String(fail?.message || "").slice(0, 160)}`);
+        if (!seen) throw new Error(describeFailure(fail, `${c.entry} 无正文错误`));
+        // 已经产出过内容后中途断流：不能装作成功。
+        // 旧版这里直接 `yield chunk; return`，既没写 attempt.error 也没写冷却
+        // （本来负责这件事的 _wrap 从未被调用），面板上就留下 `ok:false / error:null`
+        // 的哑失败，而且下一轮还会从这条渠道再撞一次。
+        attempt.ok = false;
+        attempt.midStream = true;
+        attempt.error = describeFailure(fail, `${c.entry} 中途失败`);
+        if (this.lastUse && this.lastUse.entry === c.entry) this.lastUse.midStreamError = attempt.error;
+        this.cooldown.set(c.entry, now + this._cooldownMs());
+        yield chunk;
+        return;
+      }
+      if (hasOutput(chunk)) seen = true;
+      if (!attempt.ok) {
         attempt.ok = true;
-        // 记录实际命中的供应商/模型
         this.lastUse = {
           scheme: schemeName,
           provider: c.provider,
@@ -420,29 +570,11 @@ class PoolAdapter {
           at: now,
           attempts: this.attempts.length
         };
-        if (!first.done) yield first.value;
-        // it 是 inner[Symbol.asyncIterator]() 返回的裸迭代器，自身无 Symbol.asyncIterator，
-        // 不能再 for await(it)，否则抛 "it is not async iterable"；这里手动 while 继续消费。
-        let cur = await it.next();
-        while (!cur.done) {
-          const chunk = cur.value;
-          if (chunk.type === "finish" && chunk.reason?.kind === "error") {
-            this.cooldown.set(c.entry, Date.now() + 300000);
-          }
-          yield chunk;
-          cur = await it.next();
-        }
-        return;
-      } catch (e) {
-        lastError = e;
-        attempt.error = e?.message || String(e);
-        __poolDiag(`[stream] 候选 ${c.entry} 失败: ${e?.message}\n${e?.stack || ""}`);
-        this.cooldown.set(c.entry, now + 300000);
-        continue;
       }
+      yield chunk;
+      cur = await it.next();
     }
-    __poolDiag(`[stream] 全部候选失败 lastError=${lastError?.message}`);
-    throw lastError || new Error("ModelPool: 链上所有渠道均不可用");
+    if (!seen) throw new Error(`${c.entry} 返回空流（无可见正文）`);
   }
   // 刷新宿主当前已注册 adapter 的 provider 集合；路由（可 await）处调用，供发起前过滤与面板标注
   async refreshRegistered() {
@@ -460,18 +592,11 @@ class PoolAdapter {
     return {
       lastUse: this.lastUse,
       attempts: this.attempts,
+      cooldownMs: this._cooldownMs(),
       cooling: [...this.cooldown.entries()]
         .map(([entry, until]) => ({ entry, until, remainingMs: Math.max(0, until - Date.now()) }))
         .filter((x) => x.remainingMs > 0)
     };
-  }
-  async *_wrap(stream, c) {
-    for await (const chunk of stream) {
-      if (chunk.type === "finish" && chunk.reason?.kind === "error") {
-        this.cooldown.set(c.entry, Date.now() + 300000);
-      }
-      yield chunk;
-    }
   }
 }
 //#endregion
@@ -558,9 +683,13 @@ function apply(ctx) {
         const rt = await collectRuntime();
         const seen = new Set();
         const providers = [];
+        const nameByProvider = new Map(rt.providers.map((p) => [p.provider, p.displayName]));
+        for (const [id, name] of readChannelNameMap()) nameByProvider.set(id, name);
         for (const p of [...providerRows(cfg), ...localCatalogRows(), ...rt.providers]) {
           if (!p || seen.has(p.provider)) continue;
           seen.add(p.provider);
+          const n = nameByProvider.get(p.provider);
+          if (n) p.displayName = n;
           providers.push(p);
         }
         sendJson(res, 200, { ok: true, providers });
@@ -614,6 +743,14 @@ function apply(ctx) {
         const rt = await collectRuntime();
         for (const r of rt.rows) pushRow(r);
         const rows = [...map.values()];
+        // 分组名跟随渠道中心：runtime pv.name 打底，connect-channels.json 里用户改的名优先覆盖；
+        // 这样渠道中心改名即时生效，本地硬编码名只在两处都缺失时兜底。
+        const nameByProvider = new Map(rt.providers.map((p) => [p.provider, p.displayName]));
+        for (const [id, name] of readChannelNameMap()) nameByProvider.set(id, name);
+        for (const r of rows) {
+          const n = nameByProvider.get(r.provider);
+          if (n) r.displayName = n;
+        }
         // 标注宿主是否已注册该 provider 的 adapter；集合未知（空）时默认可用，不误标
         for (const r of rows) r.registered = adapter.registered.size === 0 || adapter.registered.has(r.provider);
         diag(`rows=${rows.length} runtimeProviders=${rt.providers.length} rtIds=[${rt.providers.map((p) => p.provider).join(",")}]`);
@@ -685,6 +822,8 @@ function apply(ctx) {
         const state = readState(profile);
         if (body.activeScheme) state.activeScheme = body.activeScheme;
         if (body.schemes) state.schemes = body.schemes;
+        if (body.contextWindow !== undefined) state.contextWindow = body.contextWindow; // 全局上下文窗口覆盖
+        if (body.cooldownMs !== undefined) state.cooldownMs = body.cooldownMs; // 失败渠道冷却时长（毫秒）
         writeState(profile, state);
         return sendJson(res, 200, { ok: true, state });
       }
@@ -701,3 +840,6 @@ function apply(ctx) {
 }
 
 export { apply, inject, name, TRIGGER_CODES };
+// 仅给探针用：_attemptStream 的"有产出"判定需要真构造 Adapter 才能测，
+// 而 PoolAdapter 本身不进公共 API（DSH 只经 apply 拿到它）。
+export { PoolAdapter as __PoolAdapter };

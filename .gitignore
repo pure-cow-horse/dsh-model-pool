@@ -5,6 +5,9 @@ node_modules/
 model-pool.json
 *.log
 
+# 打包产物（npm pack 生成，不入库）
+*.tgz
+
 # 内部开发笔记（不公开）
 DESIGN.md
 
