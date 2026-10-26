@@ -10,8 +10,10 @@ DeepSeek Harness（DSH）插件：在一个面板里探测各供应商可用模�
   - 运行时经 `registerAdapter` 动态注册的渠道（如 Qoder / Trae 等对接插件）；
   - WorkBuddy / WorkBuddy AI 本地 catalog 缓存。
 - 同供应商分组折叠，支持全部折叠 / 全部展开。
-- 筛选：全部 / 仅可用 / 按供应商 / 按模型族；列表限屏渲染，避免上千行卡死。
+- 筛选：全部 / 仅可用 / 按供应商 / 按模型族；每组默认只列前 20 个（避免上千行卡死），
+  超出给「展开剩余 N 个」按钮；搜索或筛选时自动展开全部，不会出现"搜到了却看不见"。
 - 单模型「测」或「测试全部」：发最小请求（短超时、并发限制），标记可用 / 不可用并记录延迟与错误摘要。
+  配置渠道直连探测，运行时注册的渠道（Qoder / Trae / WorkBuddy）走宿主运行时——与链路自检同一套分叉。
 
 ### 方案与链路
 - 可建多个命名方案，例如「纯 deepseek」「纯 glm」「纯 gemini」。
@@ -68,8 +70,9 @@ node probes/verify-unsupported-effort-skip.mjs                       # 同上双
 node probes/verify-error-reporting.mjs                               # 失败原因 + 冷却配置，同上双目标
 node probes/verify-test-chain.mjs                                    # 链路自检路由，同上双目标
 node probes/verify-diag-log.mjs                                      # 诊断日志开关与轮转，同上双目标
+node probes/verify-single-test.mjs                                   # 单测渠道分叉 + 状态缓存失效，同上双目标
 ```
-五个探针共 52 项断言：
+六个探针共 64 项断言：
 - **verify-tool-call-output**（8）：正文文本算产出；**纯工具调用回合算产出**（`tool-call-delta` / `block-end(type=tool-call|tool-result)`）；
   只有 `reasoning-delta` 仍判空流；全空流与无产出的错误 finish 文案不变；产出块原样透传。
 - **verify-unsupported-effort-skip**（6）：渠道明确拒绝过的 reasoning 档位记 10 分钟，期间直接走默认档
@@ -81,6 +84,8 @@ node probes/verify-diag-log.mjs                                      # 诊断日
   `llm.stream`；运行时错误块判 fail 且原因带 code；GET 405、跨域 403、空链不报错。
 - **verify-diag-log**（7）：默认只记错误类、`DSH_MODEL_POOL_DIAG=1` 才记全量；超 5MB 轮转到 `.1`
   且只留一代；攒批落盘。
+- **verify-single-test**（12）：单模型「测」对运行时渠道不再 404，走宿主探测；配置渠道仍走直连；
+  非法键给可判读原因；状态文件缓存按 mtime 失效，外部改写后立刻读到新链。
 
 > 2026-10-24 修复记录：旧判定只认正文文本，**只发起工具调用、不带开场白**的合法 agent 回合
 > 被判「返回空流（无可见正文）」并冷却渠道 1 分钟（当天全日志 728 次，qoder-cn 63 次、

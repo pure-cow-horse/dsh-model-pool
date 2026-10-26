@@ -142,7 +142,13 @@ function providerRows(cfg) {
 }
 
 // 本地 catalog 缓存扫描：WorkBuddy（国内/国际/多账号）与 Qoder（国内/国际），均为无 key 直连桌面通道
+// catalog 目录扫描缓存（2026-10-26 P1）：每次 /models 都要 readdir + 读 8 个 JSON，
+// 面板打开、手动刷新、标签挂载会连着打好几次。10 秒 TTL 足以合并突发，又不至于看不到新目录。
+const CATALOG_TTL_MS = 10000;
+let catalogCache = { at: 0, rows: null };
+
 function localCatalogRows() {
+  if (catalogCache.rows && Date.now() - catalogCache.at < CATALOG_TTL_MS) return catalogCache.rows;
   const home = dshHome();
   const out = [];
   let files = [];
@@ -194,6 +200,7 @@ function localCatalogRows() {
       if (tModels.length) out.push({ kind: "local-catalog", provider: "trae", displayName: "Trae（SOLO CN）", models: tModels });
     }
   } catch { /* 忽略 */ }
+  catalogCache = { at: Date.now(), rows: out };
   return out;
 }
 
@@ -319,15 +326,33 @@ function writeProbe(profile, data) {
   mkdirSync(dirname(fp), { recursive: true });
   writeFileSync(fp, JSON.stringify(data || {}, null, 2), "utf8");
 }
+// 状态文件读缓存（2026-10-26 P1）：`stream()` / `listModels()` / `resolveModel()` / `status()`
+// 每次都要链上配置，原来每处都是 existsSync + readFileSync + JSON.parse，
+// 一轮对话要读好几次盘。用 mtime+size 做失效键，写盘时同步更新缓存。
+const stateCache = new Map();
 function readState(profile) {
   const fp = dataFile(profile);
-  if (!existsSync(fp)) return { activeScheme: "default", schemes: { default: { builtin: "tier", chain: [] } }, probeCache: {} };
-  try { return JSON.parse(readFileSync(fp, "utf8")); } catch { return { activeScheme: "default", schemes: {}, probeCache: {} }; }
+  let stamp;
+  try { stamp = statSync(fp); } catch { stamp = null; }
+  if (!stamp) return { activeScheme: "default", schemes: { default: { builtin: "tier", chain: [] } }, probeCache: {} };
+  const hit = stateCache.get(fp);
+  if (hit && hit.mtimeMs === stamp.mtimeMs && hit.size === stamp.size) return hit.value;
+  try {
+    const value = JSON.parse(readFileSync(fp, "utf8"));
+    stateCache.set(fp, { mtimeMs: stamp.mtimeMs, size: stamp.size, value });
+    return value;
+  } catch {
+    return { activeScheme: "default", schemes: {}, probeCache: {} };
+  }
 }
 function writeState(profile, state) {
   const fp = dataFile(profile);
   mkdirSync(dirname(fp), { recursive: true });
   writeFileSync(fp, JSON.stringify(state, null, 2), "utf8");
+  try {
+    const stamp = statSync(fp);
+    stateCache.set(fp, { mtimeMs: stamp.mtimeMs, size: stamp.size, value: state });
+  } catch { /* 缓存更新失败不影响写盘 */ }
 }
 //#endregion
 
@@ -737,8 +762,12 @@ function apply(ctx) {
   const reg = (opts) => { try { ctx.webServer.register(opts); diag(`route registered ${opts.path}`); } catch (e) { if (/duplicate/i.test(e?.message || "")) { diag(`route dup skip ${opts.path}`); } else throw e; } };
 
   // 运行时动态 adapter（qoder1/trae/workbuddy 等 registerAdapter 注册的渠道）枚举：
-  // listProviders + listModels，单个 provider 失败跳过，不阻塞整体
+  // listProviders + listModels，单个 provider 失败跳过，不阻塞整体。
+  // 2026-10-26 P1：32 个 provider 逐个数模型，面板一开就是 32 次调用；加 10 秒 TTL 缓存合并突发。
+  let runtimeCache = { at: 0, value: null };
+  const RUNTIME_TTL_MS = 10000;
   async function collectRuntime() {
+    if (runtimeCache.value && Date.now() - runtimeCache.at < RUNTIME_TTL_MS) return runtimeCache.value;
     const out = { providers: [], rows: [] };
     const runtimeLlm = ctx.get("llm") || llm;
     if (!runtimeLlm || typeof runtimeLlm.listProviders !== "function") return out;
@@ -764,7 +793,38 @@ function apply(ctx) {
         });
       }
     }
+    runtimeCache = { at: Date.now(), value: out };
     return out;
+  }
+
+  /**
+   * 单个条目的探测分叉（2026-10-26 P1）：配置渠道直连、其余走宿主运行时。
+   * 单测 `/test` 与链路自检 `/test-chain` 共用这一段——此前 `/test` 只查配置行，
+   * 对 qoder / trae / workbuddy* 这类运行时注册的渠道一律 404「未找到该模型」。
+   */
+  const getLlm = () => llm || ctx.get("llm");
+  async function probeEntry(entry) {
+    const raw = String(entry ?? "");
+    const slash = raw.indexOf("/");
+    const provider = slash > 0 ? raw.slice(0, slash) : raw;
+    const modelId = slash > 0 ? raw.slice(slash + 1) : "";
+    if (!modelId) {
+      return { status: "skip", latency: 0, channel: "invalid", error: "模型键缺少 provider/model 结构" };
+    }
+    const cfg = readSettingsCached(profile);
+    const p = providerRows(cfg).find((x) => x.provider === provider);
+    try {
+      if (p && p.baseURL && (p.api === "openai-completions" || p.api === "deepseek")) {
+        const apiKey = p.apiKeyEnv ? (await credentials.resolve(p.apiKeyEnv))?.value : "";
+        if (p.apiKeyEnv && !apiKey) {
+          return { status: "fail", latency: 0, code: "AUTH", channel: "direct", error: `未配置 ${p.apiKeyEnv} 的 Key` };
+        }
+        return { ...(await probeDirect(p.baseURL, apiKey, modelId)), channel: "direct" };
+      }
+      return { ...(await probeViaRuntime(getLlm(), provider, modelId)), channel: "runtime" };
+    } catch (e) {
+      return { status: "fail", latency: 0, channel: "error", error: e?.message || String(e) };
+    }
   }
 
   // GET /api/model-pool/providers —— 供应商清单（不含密钥）
@@ -875,15 +935,9 @@ function apply(ctx) {
       if (!isLocalOrigin(req)) return sendJson(res, 403, { ok: false, error: "拒绝非本地来源" });
       let body;
       try { body = await readJsonBody(req); } catch (e) { return sendJson(res, 400, { ok: false, error: e.message }); }
-      const key = body.key;
-      const cfg = readSettingsCached(profile);
-      const p = providerRows(cfg).find((x) => key.startsWith(x.provider + "/"));
-      if (!p) return sendJson(res, 404, { ok: false, error: "未找到该模型（workbuddy 通道见面板说明）" });
-      const modelId = key.slice(p.provider.length + 1);
-      if (p.api !== "openai-completions" && p.api !== "deepseek") return sendJson(res, 200, { ok: true, key, status: "skip", error: `不支持 ${p.api} 协议` });
-      const apiKey = p.apiKeyEnv ? (await credentials.resolve(p.apiKeyEnv))?.value : "";
-      if (!apiKey) return sendJson(res, 200, { ok: true, key, status: "fail", code: "AUTH", error: `未配置 ${p.apiKeyEnv} 的 Key` });
-      const r = await probeDirect(p.baseURL, apiKey, modelId);
+      const key = String(body.key || "");
+      if (!key) return sendJson(res, 400, { ok: false, error: "缺少 key" });
+      const r = await probeEntry(key);
       sendJson(res, 200, { ok: true, key, ...r });
     }
   });
@@ -905,31 +959,11 @@ function apply(ctx) {
       if (chain.length === 0) {
         return sendJson(res, 200, { ok: true, scheme: schemeName, chain: [], results: {}, testedAt: Date.now() });
       }
-      const cfg = readSettingsCached(profile);
-      const rows = providerRows(cfg);
-      const getLlm = () => llm || ctx.get("llm");
       const results = {};
       const conc = Math.max(1, Math.min(Number(body.concurrency) || 4, 8));
       for (let i = 0; i < chain.length; i += conc) {
         await Promise.all(chain.slice(i, i + conc).map(async (entry) => {
-          const slash = String(entry).indexOf("/");
-          const provider = slash > 0 ? String(entry).slice(0, slash) : String(entry);
-          const modelId = slash > 0 ? String(entry).slice(slash + 1) : "";
-          const p = rows.find((x) => x.provider === provider);
-          try {
-            if (p && p.baseURL && (p.api === "openai-completions" || p.api === "deepseek")) {
-              const apiKey = p.apiKeyEnv ? (await credentials.resolve(p.apiKeyEnv))?.value : "";
-              if (p.apiKeyEnv && !apiKey) {
-                results[entry] = { status: "fail", latency: 0, code: "AUTH", channel: "direct", error: `未配置 ${p.apiKeyEnv} 的 Key` };
-              } else {
-                results[entry] = { ...(await probeDirect(p.baseURL, apiKey, modelId)), channel: "direct" };
-              }
-            } else {
-              results[entry] = { ...(await probeViaRuntime(getLlm(), provider, modelId)), channel: "runtime" };
-            }
-          } catch (e) {
-            results[entry] = { status: "fail", latency: 0, channel: "error", error: e?.message || String(e) };
-          }
+          results[entry] = await probeEntry(entry);
         }));
       }
       sendJson(res, 200, { ok: true, scheme: schemeName, chain, results, testedAt: Date.now() });

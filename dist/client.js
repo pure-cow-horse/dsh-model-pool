@@ -123,6 +123,7 @@
     const [newScheme, setNewScheme] = useState("");
     const [meta, setMeta] = useState("尚未加载");
     const [collapsed, setCollapsed] = useState({}); // provider -> true 折叠
+    const [expanded, setExpanded] = useState({}); // provider -> true 展开全部（默认每组只列前 20）
     const [tab, setTab] = useState("models"); // models / schemes
     const dragRef = useRef(null); // 当前拖拽的链下标
     const [current, setCurrent] = useState(null); // 最近一次实际命中
@@ -285,6 +286,8 @@
     const groups = {};
     for (const m of filtered) (groups[m.provider] = groups[m.provider] || []).push(m);
     const groupKeys = Object.keys(groups);
+    // 搜索 / 筛选时自动展开全部分组，避免"搜到了却看不见"（原来固定只渲染前 20 个）
+    const autoExpand = Boolean(q) || filter !== "all";
 
     const badge = (key) => {
       const r = results[key];
@@ -398,7 +401,12 @@
             (isCol ? "▶ " : "▼ ") + rows[0].displayName + `（${rows.length} 个模型` + (selCount ? `，已选 ${selCount}` : "") + "）"
           ));
           if (isCol) return [headRow];
-          return [headRow, ...rows.slice(0, 20).map((m) => {
+          // 每组默认只列前 20 个（330 个模型全渲染会卡），但必须给出口：
+          // 原来 `rows.slice(0, 20)` 后面什么都没有，trae(31)/workbuddy-ai(28)/workbuddy4(26)
+          // 有 25 个模型在面板里根本勾不到。
+          const showAll = autoExpand || expanded[provider] === true;
+          const shown = showAll ? rows : rows.slice(0, 20);
+          const out = [headRow, ...shown.map((m) => {
             const unavailable = m.registered === false;
             return React.createElement("tr", { key: m.key, style: { opacity: unavailable ? 0.45 : 1 } },
               React.createElement("td", { style: styles.td }, React.createElement("input", { type: "checkbox", disabled: unavailable, checked: !!checked[m.key], onChange: () => setChecked((p) => ({ ...p, [m.key]: !p[m.key] })) })),
@@ -410,6 +418,19 @@
               React.createElement("td", { style: styles.td }, unavailable ? "未注册" : React.createElement("button", { style: styles.btn, onClick: () => testOne(m.key) }, "测"))
             );
           })];
+          if (rows.length > 20) {
+            out.push(React.createElement("tr", { key: "more:" + provider },
+              React.createElement("td", { colSpan: 7, style: { ...styles.td, textAlign: "center" } },
+                autoExpand
+                  ? React.createElement("span", { style: { fontSize: 12, color: "#999" } }, `已展开全部 ${rows.length} 个（筛选状态）`)
+                  : React.createElement("button", {
+                      style: styles.btn,
+                      onClick: () => setExpanded((p) => ({ ...p, [provider]: !showAll }))
+                    }, showAll ? "收起，只看前 20 个" : `展开剩余 ${rows.length - 20} 个（共 ${rows.length}）`)
+              )
+            ));
+          }
+          return out;
         }))
       ),
       )
