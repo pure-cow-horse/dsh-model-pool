@@ -827,6 +827,20 @@ function apply(ctx) {
   }
 
   /**
+   * 供应商定义优先读**活配置**（settings.describe），文件只作兜底。
+   * 因为「启用/禁用」是通过 settings.replace 改配置的，写盘与内存可能有一瞬不同步，
+   * 面板必须看到宿主实际在用的那份，否则禁用了还显示、启用了还不出现。
+   */
+  function livePiaiSection() {
+    const ready = piaiDescriptor();
+    const v = ready?.desc?.value;
+    if (v && typeof v === "object") return v;
+    const fromFile = readSettingsCached(profile)["llm-pi-ai"];
+    return fromFile && typeof fromFile === "object" ? fromFile : {};
+  }
+  const providerRowsLive = () => providerRows({ "llm-pi-ai": livePiaiSection() });
+
+  /**
    * 把某供应商的模型清单整体替换为 `ids`（用户选择"按勾选整体替换"）。
    * 安全措施：写前备份 patch、按 revision 重试冲突、写后回读逐项校验。
    * 已有模型保留原有的完整对象（contextWindow / maxTokens / compat 等），
@@ -886,8 +900,7 @@ function apply(ctx) {
     if (!modelId) {
       return { status: "skip", latency: 0, channel: "invalid", error: "模型键缺少 provider/model 结构" };
     }
-    const cfg = readSettingsCached(profile);
-    const p = providerRows(cfg).find((x) => x.provider === provider);
+    const p = providerRowsLive().find((x) => x.provider === provider);
     try {
       if (p && p.baseURL && (p.api === "openai-completions" || p.api === "deepseek")) {
         const apiKey = p.apiKeyEnv ? (await credentials.resolve(p.apiKeyEnv))?.value : "";
@@ -915,7 +928,7 @@ function apply(ctx) {
         const providers = [];
         const nameByProvider = new Map(rt.providers.map((p) => [p.provider, p.displayName]));
         for (const [id, name] of readChannelNameMap()) nameByProvider.set(id, name);
-        for (const p of [...providerRows(cfg), ...localCatalogRows(), ...rt.providers]) {
+        for (const p of [...providerRowsLive(), ...localCatalogRows(), ...rt.providers]) {
           if (!p || seen.has(p.provider)) continue;
           seen.add(p.provider);
           const n = nameByProvider.get(p.provider);
@@ -940,8 +953,7 @@ function apply(ctx) {
       try { body = await readJsonBody(req); } catch (e) { return sendJson(res, 400, { ok: false, error: e.message }); }
       const provider = String(body.provider || "");
       if (!provider) return sendJson(res, 400, { ok: false, error: "缺少 provider" });
-      const cfg = readSettingsCached(profile);
-      const p = providerRows(cfg).find((x) => x.provider === provider);
+      const p = providerRowsLive().find((x) => x.provider === provider);
       if (!p) return sendJson(res, 404, { ok: false, error: `${provider} 不是配置型渠道，没有可拉取的上游目录` });
       if (!p.baseURL) return sendJson(res, 400, { ok: false, error: `${provider} 未配置 baseURL` });
       if (p.api !== "openai-completions" && p.api !== "deepseek") {
@@ -982,6 +994,88 @@ function apply(ctx) {
     }
   });
 
+  // POST /api/model-pool/toggle-provider {provider, enabled} —— 启用 / 禁用供应商
+  // 宿主没有"按供应商禁用"的开关（llm-pi-ai 与 dsh-llm 里都没有这类字段），所以做法是：
+  //   禁用 = 把该供应商从 llm-pi-ai.providers 摘掉，完整定义暂存到 model-pool.json；
+  //          宿主随即不再为它注册 adapter → 对话的模型选择器里自然消失。
+  //   启用 = 把暂存的定义原样写回。
+  // 好处是 key / baseURL / 模型清单都不丢，随时可恢复；代价是会触发 llm-pi-ai 配置重载。
+  reg({
+    kind: "exact",
+    path: "/api/model-pool/toggle-provider",
+    handler: async (req, res) => {
+      if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "只接受 POST" });
+      if (!isLocalOrigin(req)) return sendJson(res, 403, { ok: false, error: "拒绝非本地来源" });
+      let body = {};
+      try { body = await readJsonBody(req); } catch (e) { return sendJson(res, 400, { ok: false, error: e.message }); }
+      const provider = String(body.provider || "");
+      const enable = body.enabled !== false;
+      if (!provider) return sendJson(res, 400, { ok: false, error: "缺少 provider" });
+      if (!piaiDescriptor()) return sendJson(res, 400, { ok: false, error: "设置服务不可用或找不到 llm-pi-ai 配置段" });
+
+      const state = readState(profile);
+      const stashed = { ...(state.disabledProviders || {}) };
+
+      // 先算一下会影响哪些链条目，回给前端提示
+      const affected = [];
+      for (const [name, scheme] of Object.entries(state.schemes || {})) {
+        for (const entry of (scheme && Array.isArray(scheme.chain) ? scheme.chain : [])) {
+          if (typeof entry === "string" && entry.startsWith(provider + "/")) affected.push(`${name}: ${entry}`);
+        }
+      }
+
+      const patchPath = profile?.patchPath;
+      let backupPath = "";
+      if (patchPath && existsSync(patchPath)) {
+        backupPath = `${patchPath}.bak-modelpool-${Date.now()}`;
+        try { writeFileSync(backupPath, readFileSync(patchPath)); } catch { backupPath = ""; }
+      }
+
+      let lastError;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const current = piaiDescriptor();
+        if (!current) return sendJson(res, 400, { ok: false, error: "llm-pi-ai 配置段不可读" });
+        const section = current.desc.value && typeof current.desc.value === "object" ? current.desc.value : {};
+        const providers = { ...(section.providers || {}) };
+
+        if (enable) {
+          if (providers[provider]) return sendJson(res, 200, { ok: true, provider, enabled: true, affected, already: true });
+          if (!stashed[provider]) return sendJson(res, 400, { ok: false, error: `没有找到「${provider}」的暂存定义，无法恢复；请到 设置 → 模型 里重新添加` });
+          providers[provider] = stashed[provider];
+          delete stashed[provider];
+        } else {
+          if (!providers[provider]) return sendJson(res, 200, { ok: true, provider, enabled: false, affected, already: true });
+          stashed[provider] = providers[provider];
+          delete providers[provider];
+        }
+
+        try {
+          await current.settings.replace("llm-pi-ai", { ...section, providers }, current.desc.revision);
+        } catch (e) {
+          lastError = e;
+          const conflict = e?.code === "SETTINGS_CONFLICT" || e?.status === 409 || /conflict|revision/i.test(e?.message || "");
+          if (conflict && attempt < 2) continue;
+          return sendJson(res, 400, { ok: false, error: `写入 llm-pi-ai 失败：${e?.message || e}` });
+        }
+
+        const after = piaiDescriptor();
+        const present = Boolean(after?.desc?.value?.providers?.[provider]);
+        if (present !== enable) {
+          return sendJson(res, 400, {
+            ok: false,
+            error: `写入后回读不一致：期望${enable ? "启用" : "禁用"}，实际${present ? "启用" : "禁用"}${backupPath ? `（可回滚：${backupPath}）` : ""}`
+          });
+        }
+
+        state.disabledProviders = stashed;
+        writeState(profile, state);
+        diag(`toggle-provider ${provider} -> ${enable ? "enabled" : "disabled"}, affected=${affected.length}, backup=${backupPath || "(无)"}`);
+        return sendJson(res, 200, { ok: true, provider, enabled: enable, affected, backupPath });
+      }
+      sendJson(res, 400, { ok: false, error: lastError?.message || "写入失败" });
+    }
+  });
+
   // GET /api/model-pool/models —— 拉上游全目录并合并已配置模型
   reg({
     kind: "exact",
@@ -995,7 +1089,7 @@ function apply(ctx) {
         const map = new Map();
         const pushRow = (r) => { if (r.key && !map.has(r.key)) map.set(r.key, r); };
         // 静态 llm-pi-ai 已配置模型
-        for (const p of providerRows(cfg)) {
+        for (const p of providerRowsLive()) {
           for (const m of p.configuredModels) {
             pushRow({
               key: `${p.provider}/${m.id}`,

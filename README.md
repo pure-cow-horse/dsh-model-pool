@@ -19,6 +19,11 @@ DeepSeek Harness（DSH）插件：在一个面板里探测各供应商可用模�
   写入语义是**整体替换**（没勾的会从 DSH 移除），写前自动备份 patch、按 revision 重试冲突、写后回读校验。
   只对配置型渠道有效——运行时渠道没有可直连的上游目录，它们的模型本来就由宿主 `listModels` 提供。
 
+- **供应商启用 / 禁用**：分组头「禁用」把该渠道从 `llm-pi-ai.providers` 摘出来（完整定义暂存到
+  `model-pool.json` 的 `disabledProviders`），宿主随即不再注册它——**对话的模型选择列表里就看不到了**；
+  面板顶部「已禁用」条里点「启用」原样写回。不丢 key / baseURL / 模型清单，写前同样备份 patch。
+  （宿主没有按供应商禁用的字段，只能这么做；禁用正在链上使用的渠道会提示受影响的条目数。）
+
 ### 方案与链路
 - 可建多个命名方案，例如「纯 deepseek」「纯 glm」「纯 gemini」。
 - **+ 勾选加入当前方案**：把勾选模型去重追加到链末尾，不覆盖原有顺序。
@@ -78,8 +83,9 @@ node probes/verify-test-chain.mjs                                    # 链路自
 node probes/verify-diag-log.mjs                                      # 诊断日志开关与轮转，同上双目标
 node probes/verify-single-test.mjs                                   # 单测渠道分叉 + 状态缓存失效，同上双目标
 node probes/verify-upstream-apply.mjs                                # 拉上游目录 + 写回 DSH 配置，同上双目标
+node probes/verify-provider-toggle.mjs                               # 供应商启用/禁用，同上双目标
 ```
-七个探针共 77 项断言：
+八个探针共 92 项断言：
 - **verify-tool-call-output**（8）：正文文本算产出；**纯工具调用回合算产出**（`tool-call-delta` / `block-end(type=tool-call|tool-result)`）；
   只有 `reasoning-delta` 仍判空流；全空流与无产出的错误 finish 文案不变；产出块原样透传。
 - **verify-unsupported-effort-skip**（6）：渠道明确拒绝过的 reasoning 档位记 10 分钟，期间直接走默认档
@@ -95,6 +101,8 @@ node probes/verify-upstream-apply.mjs                                # 拉上游
   非法键给可判读原因；状态文件缓存按 mtime 失效，外部改写后立刻读到新链。
 - **verify-upstream-apply**（13）：本地假上游验证 `GET /v1/models` 拉目录、已接入清单、未知渠道拒绝；
   写回后清单即勾选结果、原有模型字段不被抹掉、新模型补最小对象、写前留备份、回读不一致必须报错。
+- **verify-provider-toggle**（15）：禁用后配置里没有该供应商、完整定义进暂存可无损恢复、算出受影响链条目、
+  留备份；`/models` 立刻看不到它（证明确实读活配置而非磁盘文件）；冲突重试、无暂存启用报错、跨域 403。
 
 > 2026-10-24 修复记录：旧判定只认正文文本，**只发起工具调用、不带开场白**的合法 agent 回合
 > 被判「返回空流（无可见正文）」并冷却渠道 1 分钟（当天全日志 728 次，qoder-cn 63 次、

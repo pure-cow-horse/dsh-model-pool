@@ -448,7 +448,51 @@
       React.createElement("button", { style: { ...styles.tabBtn, ...(tab === "schemes" ? styles.tabBtnActive : {}) }, onClick: () => setTab("schemes") }, "方案与链路")
     );
 
+    /**
+     * 启用 / 禁用供应商。
+     * 禁用会把该供应商从 llm-pi-ai 配置里摘出来（定义暂存在 model-pool.json），
+     * 宿主不再注册它 → 对话的模型选择列表里看不到；启用时原样写回。
+     */
+    const toggleProvider = async (provider, enable) => {
+      const chains = [];
+      for (const [name, sc] of Object.entries(state.schemes || {})) {
+        for (const e of (sc?.chain || [])) if (String(e).startsWith(provider + "/")) chains.push(`${name}: ${e}`);
+      }
+      const tip = enable
+        ? `重新启用「${provider}」？配置里的模型会回到 DSH 的模型选择列表。`
+        : `禁用「${provider}」？它会从 DSH 的模型选择列表消失，配置会暂存、随时可恢复。` +
+          (chains.length ? `\n\n注意：当前链上有 ${chains.length} 条引用它，禁用后这些会顺延到下一条。` : "");
+      if (typeof window !== "undefined" && typeof window.confirm === "function" && !window.confirm(tip)) return;
+      try {
+        const j = await api("/api/model-pool/toggle-provider", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider, enabled: enable }) });
+        if (!j.ok) {
+          setNotice({ type: "err", text: j.error || "操作失败" });
+          return;
+        }
+        setNotice({ type: "ok", text: enable ? `${provider} 已启用` : `${provider} 已禁用` });
+        await loadState();
+        await loadModels(true);
+      } catch (e) {
+        setNotice({ type: "err", text: String(e?.message || e) });
+      }
+    };
+
+    const disabledProviders = Object.keys((state && state.disabledProviders) || {});
+    const disabledStrip = disabledProviders.length === 0 ? null : React.createElement("div", {
+      style: { marginBottom: 10, padding: "8px 10px", background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: 8, fontSize: 12, display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }
+    },
+      React.createElement("span", { style: { color: "#9a3412", fontWeight: 600 } }, `已禁用 ${disabledProviders.length} 个供应商（不出现在对话的模型列表）`),
+      ...disabledProviders.map((p) => React.createElement("span", {
+        key: p,
+        style: { display: "inline-flex", alignItems: "center", gap: 6, background: "#fff", border: "1px solid #fed7aa", borderRadius: 999, padding: "2px 8px" }
+      },
+        p,
+        React.createElement("button", { style: { ...styles.btn, height: 22, padding: "0 8px", fontSize: 11 }, onClick: () => toggleProvider(p, true) }, "启用")
+      ))
+    );
+
     const modelsPane = React.createElement("div", null,
+      disabledStrip,
       React.createElement("div", { style: styles.toolbar },
         React.createElement("button", { style: { ...styles.btn, ...styles.btnPrimary }, onClick: () => loadModels(true), disabled: refreshing }, refreshing ? "刷新中…" : "刷新目录"),
         React.createElement("button", { style: styles.btn, onClick: testAll, disabled: busy }, busy ? "测试中…" : "测试全部"),
@@ -501,7 +545,12 @@
               title: "拉取该供应商上游 /v1/models 全目录，勾选后写回 DSH 配置",
               disabled: upstreamBusy === provider,
               onClick: (e) => { e.stopPropagation(); pullUpstream(provider); }
-            }, upstreamBusy === provider ? "拉取中…" : "拉上游") : null
+            }, upstreamBusy === provider ? "拉取中…" : "拉上游") : null,
+            canPull ? React.createElement("button", {
+              style: { ...styles.btn, marginLeft: 6, padding: "0 8px", fontWeight: 400, color: "#9a3412" },
+              title: "从 DSH 的模型选择列表里隐藏该供应商（配置会暂存，可恢复）",
+              onClick: (e) => { e.stopPropagation(); toggleProvider(provider, false); }
+            }, "禁用") : null
           ));
           const panel = upstream[provider] ? upstreamPanel(provider) : null;
           if (isCol) return panel ? [headRow, panel] : [headRow];
