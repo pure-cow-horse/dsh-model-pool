@@ -39,7 +39,9 @@ DeepSeek Harness（DSH）插件：在一个面板里探测各供应商可用模�
 
 ## 数据
 - 方案、激活方案与链路保存在 `<profile.dir>/model-pool.json`，不改动 `llm-pi-ai` 配置。
-- 测试结果仅保存在面板内存，不落盘、不存储上游凭证。
+- 测试结果（状态/延迟/错误）持久化到 `<profile.dir>/model-pool-probe.json`，刷新后仍在，不存上游凭证。
+- 诊断日志在 `~/.dsh/model-pool-diag.log`：**默认只记错误**，要看全量请求轨迹需设 `DSH_MODEL_POOL_DIAG=1`；
+  单文件超过 5MB 自动轮转到 `model-pool-diag.log.1`（只留一代）。
 
 ## 目录
 ```
@@ -65,8 +67,9 @@ POOL_PROBE_TARGET=installed node probes/verify-tool-call-output.mjs  # 测 profi
 node probes/verify-unsupported-effort-skip.mjs                       # 同上双目标，加 POOL_PROBE_TARGET=installed
 node probes/verify-error-reporting.mjs                               # 失败原因 + 冷却配置，同上双目标
 node probes/verify-test-chain.mjs                                    # 链路自检路由，同上双目标
+node probes/verify-diag-log.mjs                                      # 诊断日志开关与轮转，同上双目标
 ```
-四个探针共 45 项断言：
+五个探针共 52 项断言：
 - **verify-tool-call-output**（8）：正文文本算产出；**纯工具调用回合算产出**（`tool-call-delta` / `block-end(type=tool-call|tool-result)`）；
   只有 `reasoning-delta` 仍判空流；全空流与无产出的错误 finish 文案不变；产出块原样透传。
 - **verify-unsupported-effort-skip**（6）：渠道明确拒绝过的 reasoning 档位记 10 分钟，期间直接走默认档
@@ -76,6 +79,8 @@ node probes/verify-test-chain.mjs                                    # 链路自
   `error` 不再可能为 null；冷却默认 60 秒、可配、5 秒～1 小时 clamp；POST 能持久化、GET 能读回。
 - **verify-test-chain**（14）：链路自检只测链上条目且保持顺序；配置渠道走直连、运行时渠道走
   `llm.stream`；运行时错误块判 fail 且原因带 code；GET 405、跨域 403、空链不报错。
+- **verify-diag-log**（7）：默认只记错误类、`DSH_MODEL_POOL_DIAG=1` 才记全量；超 5MB 轮转到 `.1`
+  且只留一代；攒批落盘。
 
 > 2026-10-24 修复记录：旧判定只认正文文本，**只发起工具调用、不带开场白**的合法 agent 回合
 > 被判「返回空流（无可见正文）」并冷却渠道 1 分钟（当天全日志 728 次，qoder-cn 63 次、

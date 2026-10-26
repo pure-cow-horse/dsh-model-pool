@@ -60,6 +60,19 @@
     return Math.floor(v);
   }
 
+  // 显示名缓存（2026-10-26 P0）：对话标签只需要 provider/model → 显示名，
+  // 原实现跟着 3 秒轮询把 330 行 / 80KB 的完整清单一起拉，纯属浪费。
+  // 现在清单挂载取一次、5 分钟刷新一次，跨组件重挂载也复用。
+  let modelNameCache = { at: 0, map: null };
+  const MODEL_CACHE_TTL_MS = 5 * 60 * 1000;
+  function readModelCache(force) {
+    if (force || !modelNameCache.map) return null;
+    return Date.now() - modelNameCache.at > MODEL_CACHE_TTL_MS ? null : modelNameCache.map;
+  }
+  function writeModelCache(map) {
+    modelNameCache = { at: Date.now(), map };
+  }
+
   const styles = {
     wrap: { padding: 16, fontSize: 13, color: "var(--dsw-alias-label-primary,#333)" },
     toolbar: { display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 12 },
@@ -539,35 +552,69 @@
 
   // 对话输入框模型名旁：仅当选中 ModelPool 方案时，追加显示实际命中的供应商/模型 + 紧凑思考强度切换
   function PoolLabel(props) {
-    const { useState, useEffect } = getReact();
+    const { useState, useEffect, useRef } = getReact();
     const [use, setUse] = useState(null);
     const [byKey, setByKey] = useState({});
     const [scheme, setScheme] = useState(null);
+    const useSigRef = useRef("-");
+    const chainSigRef = useRef("");
     useEffect(() => {
       let alive = true;
-      const load = async () => {
+      // 2026-10-26 P0：原来每 3 秒把 /current + /models（330 行/80KB）+ /chain 一起拉一遍，
+      // 只为显示一个「供应商 / 模型」文本。现在拆成三条各自节奏：
+      //   命中标签 5 秒（/current 只有 <1KB）、方案与强度 30 秒、清单 5 分钟（模块级缓存）。
+      // 页面隐藏时一律跳过，避免后台标签页空转。
+      const tickCurrent = async () => {
+        if (document.hidden) return;
         try {
-          const [cj, mj, ch] = await Promise.all([
-            fetch("/api/model-pool/current").then((r) => r.json()).catch(() => null),
-            fetch("/api/model-pool/models").then((r) => r.json()).catch(() => null),
-            fetch("/api/model-pool/chain").then((r) => r.json()).catch(() => null)
-          ]);
-          if (!alive) return;
-          if (cj && cj.ok) setUse(cj.status?.lastUse || null);
-          const map = {};
-          if (mj && mj.ok && Array.isArray(mj.models)) {
-            for (const row of mj.models) map[row.key] = row;
-          }
-          setByKey(map);
-          if (ch && ch.ok) {
-            const sn = ch.state?.activeScheme;
-            setScheme({ name: sn, effort: ch.state?.schemes?.[sn]?.effort || "" });
-          }
+          const cj = await fetch("/api/model-pool/current", { cache: "no-store" }).then((r) => r.json()).catch(() => null);
+          if (!alive || !cj || !cj.ok) return;
+          const next = cj.status?.lastUse || null;
+          const sig = next ? `${next.entry}|${next.at}` : "-";
+          if (sig === useSigRef.current) return; // 没变就不 setState，省掉每 5 秒一次重渲染
+          useSigRef.current = sig;
+          setUse(next);
         } catch { /* 忽略 */ }
       };
-      load();
-      const timer = setInterval(load, 3000);
-      return () => { alive = false; clearInterval(timer); };
+      const tickChain = async () => {
+        if (document.hidden) return;
+        try {
+          const ch = await fetch("/api/model-pool/chain", { cache: "no-store" }).then((r) => r.json()).catch(() => null);
+          if (!alive || !ch || !ch.ok) return;
+          const sn = ch.state?.activeScheme;
+          const effort = ch.state?.schemes?.[sn]?.effort || "";
+          const sig = `${sn}|${effort}`;
+          if (sig === chainSigRef.current) return;
+          chainSigRef.current = sig;
+          setScheme({ name: sn, effort });
+        } catch { /* 忽略 */ }
+      };
+      const loadModels = async (force) => {
+        if (!force) {
+          const cached = readModelCache(false);
+          if (cached) { if (alive) setByKey(cached); return; }
+        }
+        try {
+          const mj = await fetch("/api/model-pool/models", { cache: "no-store" }).then((r) => r.json()).catch(() => null);
+          if (!alive || !mj || !mj.ok || !Array.isArray(mj.models)) return;
+          const map = {};
+          for (const row of mj.models) map[row.key] = row;
+          writeModelCache(map);
+          setByKey(map);
+        } catch { /* 忽略 */ }
+      };
+      loadModels(false);
+      tickCurrent();
+      tickChain();
+      const tCurrent = setInterval(tickCurrent, 5000);
+      const tChain = setInterval(tickChain, 30000);
+      const tModels = setInterval(() => loadModels(true), MODEL_CACHE_TTL_MS);
+      return () => {
+        alive = false;
+        clearInterval(tCurrent);
+        clearInterval(tChain);
+        clearInterval(tModels);
+      };
     }, []);
     const name = props?.model?.name || "";
     const isPool = props?.provider?.id === "ModelPool" || props?.model?.provider === "ModelPool";

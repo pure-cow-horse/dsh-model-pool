@@ -1,7 +1,7 @@
 // dsh-model-pool host 侧（ESM，手写免构建）
 // 功能1：读 llm-pi-ai providers → 拉上游 /v1/models 全目录 → 最小请求测可用性/延迟。
 // 功能2：多方案（内置3 + 自定义命名链），虚拟 provider ModelPool/Auto 自带顺延引擎接管。
-import { existsSync, readFileSync, writeFileSync, readdirSync, statSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, appendFileSync, renameSync, unlinkSync, readdirSync, statSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { load as loadYAML, DEFAULT_SCHEMA, Schema as YamlSchema, Type as YamlType } from "js-yaml";
@@ -656,7 +656,52 @@ const inject = ["tools", "webServer", "credentials"];
 
 function apply(ctx) {
   const diagFile = join(dshHome(), "model-pool-diag.log");
-  const diag = (msg) => { try { writeFileSync(diagFile, `[${new Date().toISOString()}] ${msg}\n`, { flag: "a" }); } catch { /* 忽略 */ } };
+  /**
+   * 诊断日志（2026-10-26 P0）。
+   *
+   * 原来每行一次 `writeFileSync(..., {flag:"a"})`，而聊天标签每 3 秒就会打一次
+   * `/models` 的调用日志（每次 3 行）——单文件涨到 **33.8MB / 17 万行**，其中 70%
+   * 是这种无信息量的轮询记录，而且同步写在请求路径上会卡事件循环。
+   *
+   * 现在三条约束：
+   *   1. 默认只记错误类；要看全量得显式开 `DSH_MODEL_POOL_DIAG=1`；
+   *   2. 攒到 500ms 批量落地，不再一行一次同步写；
+   *   3. 单文件超过 5MB 自动轮转到 `model-pool-diag.log.1`（只留一代）。
+   */
+  const DIAG_VERBOSE = /^(1|true|yes|on)$/i.test(String(process.env.DSH_MODEL_POOL_DIAG || ""));
+  const DIAG_MAX_BYTES = 5 * 1024 * 1024;
+  const DIAG_ERROR_RE = /(error|失败|异常|错误|不可用)/i;
+  let diagSize = null;
+  let diagQueue = [];
+  let diagTimer = null;
+
+  const flushDiag = () => {
+    diagTimer = null;
+    if (diagQueue.length === 0) return;
+    const text = diagQueue.join("");
+    diagQueue = [];
+    try {
+      if (diagSize === null) diagSize = existsSync(diagFile) ? statSync(diagFile).size : 0;
+      if (diagSize + Buffer.byteLength(text) > DIAG_MAX_BYTES) {
+        try {
+          const bak = `${diagFile}.1`;
+          if (existsSync(bak)) unlinkSync(bak);
+          if (existsSync(diagFile)) renameSync(diagFile, bak);
+        } catch { /* 轮转失败不影响主流程 */ }
+        diagSize = 0;
+      }
+      appendFileSync(diagFile, text);
+      diagSize += Buffer.byteLength(text);
+    } catch { /* 诊断失败一律忽略 */ }
+  };
+
+  const diag = (msg) => {
+    if (!DIAG_VERBOSE && !DIAG_ERROR_RE.test(String(msg))) return;
+    diagQueue.push(`[${new Date().toISOString()}] ${msg}\n`);
+    if (diagTimer) return;
+    diagTimer = setTimeout(flushDiag, 500);
+    if (typeof diagTimer.unref === "function") diagTimer.unref();
+  };
   __poolDiag = diag;
   const profile = ctx.get("profileContext");
   diag(`apply start; profile=${!!profile} webServer=${!!ctx.webServer} credentials=${!!ctx.credentials} llm=${!!ctx.get("llm")} logger=${!!ctx.logger}`);
