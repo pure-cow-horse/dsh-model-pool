@@ -50,8 +50,8 @@ DeepSeek Harness（DSH）插件：在一个面板里探测各供应商可用模�
 
 ## 数据
 - 方案、激活方案与链路保存在 `<profile.dir>/model-pool.json`，不改动 `llm-pi-ai` 配置。
-  （唯一例外：面板里主动点「接入选中 N 个」会写 `llm-pi-ai.providers.<供应商>.models`，
-  写前在 profile 目录留 `cordis.patch.yml.bak-modelpool-<时间戳>`。）
+  （唯一例外：面板里主动点「接入选中 N 个」或「禁用」会写 `llm-pi-ai.providers.<供应商>`，
+  写前在 profile 目录留 `cordis.patch.yml.bak-modelpool-<时间戳>`，**只保留最近 10 份**。）
 - 测试结果（状态/延迟/错误）持久化到 `<profile.dir>/model-pool-probe.json`，刷新后仍在，不存上游凭证。
 - 诊断日志在 `~/.dsh/model-pool-diag.log`：**默认只记错误**，要看全量请求轨迹需设 `DSH_MODEL_POOL_DIAG=1`；
   单文件超过 5MB 自动轮转到 `model-pool-diag.log.1`（只留一代）。
@@ -84,8 +84,9 @@ node probes/verify-diag-log.mjs                                      # 诊断日
 node probes/verify-single-test.mjs                                   # 单测渠道分叉 + 状态缓存失效，同上双目标
 node probes/verify-upstream-apply.mjs                                # 拉上游目录 + 写回 DSH 配置，同上双目标
 node probes/verify-provider-toggle.mjs                               # 供应商启用/禁用，同上双目标
+node probes/verify-cache-hygiene.mjs                                 # describe 缓存/失效与备份保留，同上双目标
 ```
-八个探针共 92 项断言：
+九个探针共 101 项断言：
 - **verify-tool-call-output**（8）：正文文本算产出；**纯工具调用回合算产出**（`tool-call-delta` / `block-end(type=tool-call|tool-result)`）；
   只有 `reasoning-delta` 仍判空流；全空流与无产出的错误 finish 文案不变；产出块原样透传。
 - **verify-unsupported-effort-skip**（6）：渠道明确拒绝过的 reasoning 档位记 10 分钟，期间直接走默认档
@@ -103,6 +104,8 @@ node probes/verify-provider-toggle.mjs                               # 供应商
   写回后清单即勾选结果、原有模型字段不被抹掉、新模型补最小对象、写前留备份、回读不一致必须报错。
 - **verify-provider-toggle**（15）：禁用后配置里没有该供应商、完整定义进暂存可无损恢复、算出受影响链条目、
   留备份；`/models` 立刻看不到它（证明确实读活配置而非磁盘文件）；冲突重试、无暂存启用报错、跨域 403。
+- **verify-cache-hygiene**（9）：同批 5 次 `/test` 只 describe 一次；写入后 describe 与 runtime 缓存都失效
+  （回读校验不读旧值、面板不用等 10 秒）；备份超 10 份裁掉最旧的、最新一份保留且内容完整。
 
 > 2026-10-24 修复记录：旧判定只认正文文本，**只发起工具调用、不带开场白**的合法 agent 回合
 > 被判「返回空流（无可见正文）」并冷却渠道 1 分钟（当天全日志 728 次，qoder-cn 63 次、

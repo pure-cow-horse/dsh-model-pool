@@ -2,7 +2,7 @@
 // 功能1：读 llm-pi-ai providers → 拉上游 /v1/models 全目录 → 最小请求测可用性/延迟。
 // 功能2：多方案（内置3 + 自定义命名链），虚拟 provider ModelPool/Auto 自带顺延引擎接管。
 import { existsSync, readFileSync, writeFileSync, appendFileSync, renameSync, unlinkSync, readdirSync, statSync, mkdirSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, basename } from "node:path";
 import { homedir } from "node:os";
 import { load as loadYAML, DEFAULT_SCHEMA, Schema as YamlSchema, Type as YamlType } from "js-yaml";
 
@@ -146,6 +146,7 @@ function providerRows(cfg) {
 // 面板打开、手动刷新、标签挂载会连着打好几次。10 秒 TTL 足以合并突发，又不至于看不到新目录。
 const CATALOG_TTL_MS = 10000;
 let catalogCache = { at: 0, rows: null };
+const invalidateCatalogCache = () => { catalogCache = { at: 0, rows: null }; };
 
 function localCatalogRows() {
   if (catalogCache.rows && Date.now() - catalogCache.at < CATALOG_TTL_MS) return catalogCache.rows;
@@ -353,6 +354,29 @@ function writeState(profile, state) {
     const stamp = statSync(fp);
     stateCache.set(fp, { mtimeMs: stamp.mtimeMs, size: stamp.size, value: state });
   } catch { /* 缓存更新失败不影响写盘 */ }
+}
+
+/**
+ * 写 llm-pi-ai 之前备份 patch，并只保留最近 10 份（2026-10-27 A）。
+ * 每次备份是一份完整 patch（约 40KB），反复接入/禁用会堆成几十个文件，
+ * profile 目录越看越乱。文件名带定长毫秒时间戳，按字典序排就是时间序。
+ */
+const BACKUP_KEEP = 10;
+function backupPatchFile(profile) {
+  const patchPath = profile?.patchPath;
+  if (!patchPath || !existsSync(patchPath)) return "";
+  const dir = dirname(patchPath);
+  const prefix = `${basename(patchPath)}.bak-modelpool-`;
+  const target = `${patchPath}.bak-modelpool-${Date.now()}`;
+  try { writeFileSync(target, readFileSync(patchPath)); } catch { return ""; }
+  try {
+    const olds = readdirSync(dir).filter((f) => f.startsWith(prefix)).sort();
+    while (olds.length > BACKUP_KEEP) {
+      const victim = olds.shift();
+      try { unlinkSync(join(dir, victim)); } catch { /* 被占用就下次再清 */ }
+    }
+  } catch { /* 清理失败不影响备份本身 */ }
+  return target;
 }
 //#endregion
 
@@ -766,6 +790,7 @@ function apply(ctx) {
   // 2026-10-26 P1：32 个 provider 逐个数模型，面板一开就是 32 次调用；加 10 秒 TTL 缓存合并突发。
   let runtimeCache = { at: 0, value: null };
   const RUNTIME_TTL_MS = 10000;
+  const invalidateRuntimeCache = () => { runtimeCache = { at: 0, value: null }; };
   async function collectRuntime() {
     if (runtimeCache.value && Date.now() - runtimeCache.at < RUNTIME_TTL_MS) return runtimeCache.value;
     const out = { providers: [], rows: [] };
@@ -817,13 +842,23 @@ function apply(ctx) {
   } catch { /* 老宿主没有 inject 时退回 ctx.get */ }
   const getSettings = () => settingsSvc || (typeof ctx.get === "function" ? ctx.get("settings") : undefined);
 
-  function piaiDescriptor() {
+  // settings.describe() 会把整份 llm-pi-ai 配置（30 个供应商 × 全部模型）序列化一遍。
+  // 「测试全部」是逐个模型打 /test，每次都要查供应商定义——不缓存就是 330 次全量序列化。
+  // 800ms TTL 既能合并同批请求，又不会让外部改动（在设置页改配置）看起来不生效；
+  // 所有写路径必须传 force，否则会拿旧 revision 去 replace、或回读校验读到旧值。
+  let piaiCache = { at: 0, value: null };
+  const PIAI_TTL_MS = 800;
+  const invalidatePiaiCache = () => { piaiCache = { at: 0, value: null }; };
+  function piaiDescriptor(force) {
     const st = getSettings();
     if (!st || typeof st.describe !== "function") return undefined;
+    const now = Date.now();
+    if (!force && piaiCache.value && now - piaiCache.at < PIAI_TTL_MS) return piaiCache.value;
     let rows = [];
     try { rows = st.describe({ redactSecrets: true }) || []; } catch { return undefined; }
     const desc = rows.find((row) => row && row.ns === "llm-pi-ai");
-    return desc ? { settings: st, desc } : undefined;
+    piaiCache = { at: now, value: desc ? { settings: st, desc } : undefined };
+    return piaiCache.value;
   }
 
   /**
@@ -852,16 +887,12 @@ function apply(ctx) {
     const ready = piaiDescriptor();
     if (!ready) throw new Error("设置服务不可用或找不到 llm-pi-ai 配置段，无法写入 DSH");
 
-    const patchPath = profile?.patchPath;
-    let backupPath = "";
-    if (patchPath && existsSync(patchPath)) {
-      backupPath = `${patchPath}.bak-modelpool-${Date.now()}`;
-      try { writeFileSync(backupPath, readFileSync(patchPath)); } catch { backupPath = ""; }
-    }
+    const backupPath = backupPatchFile(profile);
 
     let lastError;
     for (let attempt = 0; attempt < 3; attempt++) {
-      const ctxReady = piaiDescriptor();
+      invalidatePiaiCache(); // 每轮都拿最新 revision
+      const ctxReady = piaiDescriptor(true);
       if (!ctxReady) throw new Error("llm-pi-ai 配置段不可读");
       const { settings, desc } = ctxReady;
       const section = desc.value && typeof desc.value === "object" ? desc.value : {};
@@ -881,11 +912,15 @@ function apply(ctx) {
         throw e;
       }
       // 回读校验：宿主可能对字段做归一化，不一致就当失败报出来（备份已留）
-      const after = piaiDescriptor();
+      invalidatePiaiCache();
+      const after = piaiDescriptor(true);
       const got = (after?.desc?.value?.providers?.[provider]?.models || []).map((m) => m.id);
       if (got.length !== models.length || got.some((id, i) => id !== models[i].id)) {
         throw new Error(`写入后回读不一致：期望 ${models.length} 个，实际 ${got.length} 个${backupPath ? `（可回滚：${backupPath}）` : ""}`);
       }
+      // 配置变了：目录/运行时枚举的 10 秒缓存必须立刻失效，否则面板要等最多 10 秒才反映
+      invalidateCatalogCache();
+      invalidateRuntimeCache();
       diag(`apply-models ${provider} -> ${got.length} 个模型，备份 ${backupPath || "(无)"}`);
       return { provider, models: got, backupPath };
     }
@@ -1024,16 +1059,12 @@ function apply(ctx) {
         }
       }
 
-      const patchPath = profile?.patchPath;
-      let backupPath = "";
-      if (patchPath && existsSync(patchPath)) {
-        backupPath = `${patchPath}.bak-modelpool-${Date.now()}`;
-        try { writeFileSync(backupPath, readFileSync(patchPath)); } catch { backupPath = ""; }
-      }
+      const backupPath = backupPatchFile(profile);
 
       let lastError;
       for (let attempt = 0; attempt < 3; attempt++) {
-        const current = piaiDescriptor();
+        invalidatePiaiCache();
+        const current = piaiDescriptor(true);
         if (!current) return sendJson(res, 400, { ok: false, error: "llm-pi-ai 配置段不可读" });
         const section = current.desc.value && typeof current.desc.value === "object" ? current.desc.value : {};
         const providers = { ...(section.providers || {}) };
@@ -1058,7 +1089,8 @@ function apply(ctx) {
           return sendJson(res, 400, { ok: false, error: `写入 llm-pi-ai 失败：${e?.message || e}` });
         }
 
-        const after = piaiDescriptor();
+        invalidatePiaiCache();
+        const after = piaiDescriptor(true);
         const present = Boolean(after?.desc?.value?.providers?.[provider]);
         if (present !== enable) {
           return sendJson(res, 400, {
@@ -1069,6 +1101,8 @@ function apply(ctx) {
 
         state.disabledProviders = stashed;
         writeState(profile, state);
+        invalidateCatalogCache();
+        invalidateRuntimeCache();
         diag(`toggle-provider ${provider} -> ${enable ? "enabled" : "disabled"}, affected=${affected.length}, backup=${backupPath || "(无)"}`);
         return sendJson(res, 200, { ok: true, provider, enabled: enable, affected, backupPath });
       }
