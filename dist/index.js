@@ -803,6 +803,81 @@ function apply(ctx) {
    * 对 qoder / trae / workbuddy* 这类运行时注册的渠道一律 404「未找到该模型」。
    */
   const getLlm = () => llm || ctx.get("llm");
+
+  // 设置服务（2026-10-26）：把勾选的模型写回 DSH 的 llm-pi-ai 配置。
+  // 插件此前只读配置，没有任何写回能力——「选择哪些模型接入 DSH」是缺的那一环。
+  let settingsSvc;
+  try {
+    if (typeof ctx.inject === "function") {
+      ctx.inject(["settings"], (sctx) => {
+        settingsSvc = sctx.settings;
+        return () => { settingsSvc = undefined; };
+      });
+    }
+  } catch { /* 老宿主没有 inject 时退回 ctx.get */ }
+  const getSettings = () => settingsSvc || (typeof ctx.get === "function" ? ctx.get("settings") : undefined);
+
+  function piaiDescriptor() {
+    const st = getSettings();
+    if (!st || typeof st.describe !== "function") return undefined;
+    let rows = [];
+    try { rows = st.describe({ redactSecrets: true }) || []; } catch { return undefined; }
+    const desc = rows.find((row) => row && row.ns === "llm-pi-ai");
+    return desc ? { settings: st, desc } : undefined;
+  }
+
+  /**
+   * 把某供应商的模型清单整体替换为 `ids`（用户选择"按勾选整体替换"）。
+   * 安全措施：写前备份 patch、按 revision 重试冲突、写后回读逐项校验。
+   * 已有模型保留原有的完整对象（contextWindow / maxTokens / compat 等），
+   * 只有上游新增、配置里没有的才按 `{id, name:id}` 建最小对象，交给宿主按默认处理。
+   */
+  async function applyModels(provider, ids) {
+    const picked = Array.from(new Set((ids || []).filter((x) => typeof x === "string" && x.trim()).map((x) => x.trim())));
+    if (picked.length === 0) throw new Error("至少要保留一个模型");
+    const ready = piaiDescriptor();
+    if (!ready) throw new Error("设置服务不可用或找不到 llm-pi-ai 配置段，无法写入 DSH");
+
+    const patchPath = profile?.patchPath;
+    let backupPath = "";
+    if (patchPath && existsSync(patchPath)) {
+      backupPath = `${patchPath}.bak-modelpool-${Date.now()}`;
+      try { writeFileSync(backupPath, readFileSync(patchPath)); } catch { backupPath = ""; }
+    }
+
+    let lastError;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const ctxReady = piaiDescriptor();
+      if (!ctxReady) throw new Error("llm-pi-ai 配置段不可读");
+      const { settings, desc } = ctxReady;
+      const section = desc.value && typeof desc.value === "object" ? desc.value : {};
+      const providers = { ...(section.providers || {}) };
+      const current = providers[provider];
+      if (!current || typeof current !== "object") throw new Error(`供应商 ${provider} 不在 llm-pi-ai 配置里`);
+      const byId = new Map((Array.isArray(current.models) ? current.models : []).filter((m) => m && m.id).map((m) => [m.id, m]));
+      const models = picked.map((id) => byId.get(id) || { id, name: id });
+      providers[provider] = { ...current, models };
+      const next = { ...section, providers };
+      try {
+        await settings.replace("llm-pi-ai", next, desc.revision);
+      } catch (e) {
+        lastError = e;
+        const conflict = e?.code === "SETTINGS_CONFLICT" || e?.status === 409 || /conflict|revision/i.test(e?.message || "");
+        if (conflict && attempt < 2) continue;
+        throw e;
+      }
+      // 回读校验：宿主可能对字段做归一化，不一致就当失败报出来（备份已留）
+      const after = piaiDescriptor();
+      const got = (after?.desc?.value?.providers?.[provider]?.models || []).map((m) => m.id);
+      if (got.length !== models.length || got.some((id, i) => id !== models[i].id)) {
+        throw new Error(`写入后回读不一致：期望 ${models.length} 个，实际 ${got.length} 个${backupPath ? `（可回滚：${backupPath}）` : ""}`);
+      }
+      diag(`apply-models ${provider} -> ${got.length} 个模型，备份 ${backupPath || "(无)"}`);
+      return { provider, models: got, backupPath };
+    }
+    throw lastError || new Error("写入 llm-pi-ai 失败");
+  }
+
   async function probeEntry(entry) {
     const raw = String(entry ?? "");
     const slash = raw.indexOf("/");
@@ -849,6 +924,61 @@ function apply(ctx) {
         }
         sendJson(res, 200, { ok: true, providers });
       } catch (e) { sendJson(res, 500, { ok: false, error: e.message }); }
+    }
+  });
+
+  // POST /api/model-pool/upstream {provider} —— 拉该供应商上游 /v1/models 全目录
+  // 只对「配置型」渠道有效（有 baseURL + Key）；qoder / trae / workbuddy 这类运行时渠道
+  // 没有可直连的上游目录，它们的模型本来就由宿主 listModels 提供。
+  reg({
+    kind: "exact",
+    path: "/api/model-pool/upstream",
+    handler: async (req, res) => {
+      if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "只接受 POST" });
+      if (!isLocalOrigin(req)) return sendJson(res, 403, { ok: false, error: "拒绝非本地来源" });
+      let body = {};
+      try { body = await readJsonBody(req); } catch (e) { return sendJson(res, 400, { ok: false, error: e.message }); }
+      const provider = String(body.provider || "");
+      if (!provider) return sendJson(res, 400, { ok: false, error: "缺少 provider" });
+      const cfg = readSettingsCached(profile);
+      const p = providerRows(cfg).find((x) => x.provider === provider);
+      if (!p) return sendJson(res, 404, { ok: false, error: `${provider} 不是配置型渠道，没有可拉取的上游目录` });
+      if (!p.baseURL) return sendJson(res, 400, { ok: false, error: `${provider} 未配置 baseURL` });
+      if (p.api !== "openai-completions" && p.api !== "deepseek") {
+        return sendJson(res, 400, { ok: false, error: `${provider} 的协议是 ${p.api}，不支持 /models 拉取` });
+      }
+      const apiKey = p.apiKeyEnv ? (await credentials.resolve(p.apiKeyEnv))?.value : "";
+      if (p.apiKeyEnv && !apiKey) return sendJson(res, 400, { ok: false, error: `未配置 ${p.apiKeyEnv} 的 Key` });
+      const r = await fetchUpstreamModels(p.baseURL, apiKey);
+      if (r.error) return sendJson(res, 200, { ok: false, provider, error: `拉取失败：${r.error}` });
+      const existing = p.configuredModels.map((m) => m.id);
+      sendJson(res, 200, {
+        ok: true,
+        provider,
+        models: r.models.map((m) => m.id).sort(),
+        existing
+      });
+    }
+  });
+
+  // POST /api/model-pool/apply-models {provider, models:[id...]} —— 勾选结果写回 DSH 配置
+  // 语义：整体替换该供应商的 models 清单（用户明确选择），不碰当前方案的链。
+  reg({
+    kind: "exact",
+    path: "/api/model-pool/apply-models",
+    handler: async (req, res) => {
+      if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "只接受 POST" });
+      if (!isLocalOrigin(req)) return sendJson(res, 403, { ok: false, error: "拒绝非本地来源" });
+      let body = {};
+      try { body = await readJsonBody(req); } catch (e) { return sendJson(res, 400, { ok: false, error: e.message }); }
+      const provider = String(body.provider || "");
+      if (!provider) return sendJson(res, 400, { ok: false, error: "缺少 provider" });
+      try {
+        const out = await applyModels(provider, Array.isArray(body.models) ? body.models : []);
+        sendJson(res, 200, { ok: true, ...out });
+      } catch (e) {
+        sendJson(res, 400, { ok: false, error: e?.message || String(e) });
+      }
     }
   });
 

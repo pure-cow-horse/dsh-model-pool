@@ -14,6 +14,10 @@ DeepSeek Harness（DSH）插件：在一个面板里探测各供应商可用模�
   超出给「展开剩余 N 个」按钮；搜索或筛选时自动展开全部，不会出现"搜到了却看不见"。
 - 单模型「测」或「测试全部」：发最小请求（短超时、并发限制），标记可用 / 不可用并记录延迟与错误摘要。
   配置渠道直连探测，运行时注册的渠道（Qoder / Trae / WorkBuddy）走宿主运行时——与链路自检同一套分叉。
+- **拉上游 + 接入 DSH**：供应商分组头上的「拉上游」会调该渠道的 `GET {baseURL}/models`，把**上游全量目录**
+  （含还没写进配置的模型）拉回面板；勾选后「接入选中 N 个」把结果写回 `llm-pi-ai.providers.<供应商>.models`。
+  写入语义是**整体替换**（没勾的会从 DSH 移除），写前自动备份 patch、按 revision 重试冲突、写后回读校验。
+  只对配置型渠道有效——运行时渠道没有可直连的上游目录，它们的模型本来就由宿主 `listModels` 提供。
 
 ### 方案与链路
 - 可建多个命名方案，例如「纯 deepseek」「纯 glm」「纯 gemini」。
@@ -41,6 +45,8 @@ DeepSeek Harness（DSH）插件：在一个面板里探测各供应商可用模�
 
 ## 数据
 - 方案、激活方案与链路保存在 `<profile.dir>/model-pool.json`，不改动 `llm-pi-ai` 配置。
+  （唯一例外：面板里主动点「接入选中 N 个」会写 `llm-pi-ai.providers.<供应商>.models`，
+  写前在 profile 目录留 `cordis.patch.yml.bak-modelpool-<时间戳>`。）
 - 测试结果（状态/延迟/错误）持久化到 `<profile.dir>/model-pool-probe.json`，刷新后仍在，不存上游凭证。
 - 诊断日志在 `~/.dsh/model-pool-diag.log`：**默认只记错误**，要看全量请求轨迹需设 `DSH_MODEL_POOL_DIAG=1`；
   单文件超过 5MB 自动轮转到 `model-pool-diag.log.1`（只留一代）。
@@ -71,8 +77,9 @@ node probes/verify-error-reporting.mjs                               # 失败原
 node probes/verify-test-chain.mjs                                    # 链路自检路由，同上双目标
 node probes/verify-diag-log.mjs                                      # 诊断日志开关与轮转，同上双目标
 node probes/verify-single-test.mjs                                   # 单测渠道分叉 + 状态缓存失效，同上双目标
+node probes/verify-upstream-apply.mjs                                # 拉上游目录 + 写回 DSH 配置，同上双目标
 ```
-六个探针共 64 项断言：
+七个探针共 77 项断言：
 - **verify-tool-call-output**（8）：正文文本算产出；**纯工具调用回合算产出**（`tool-call-delta` / `block-end(type=tool-call|tool-result)`）；
   只有 `reasoning-delta` 仍判空流；全空流与无产出的错误 finish 文案不变；产出块原样透传。
 - **verify-unsupported-effort-skip**（6）：渠道明确拒绝过的 reasoning 档位记 10 分钟，期间直接走默认档
@@ -86,6 +93,8 @@ node probes/verify-single-test.mjs                                   # 单测渠
   且只留一代；攒批落盘。
 - **verify-single-test**（12）：单模型「测」对运行时渠道不再 404，走宿主探测；配置渠道仍走直连；
   非法键给可判读原因；状态文件缓存按 mtime 失效，外部改写后立刻读到新链。
+- **verify-upstream-apply**（13）：本地假上游验证 `GET /v1/models` 拉目录、已接入清单、未知渠道拒绝；
+  写回后清单即勾选结果、原有模型字段不被抹掉、新模型补最小对象、写前留备份、回读不一致必须报错。
 
 > 2026-10-24 修复记录：旧判定只认正文文本，**只发起工具调用、不带开场白**的合法 agent 回合
 > 被判「返回空流（无可见正文）」并冷却渠道 1 分钟（当天全日志 728 次，qoder-cn 63 次、

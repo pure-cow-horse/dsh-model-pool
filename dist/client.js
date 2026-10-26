@@ -130,6 +130,9 @@
     const [ctxInput, setCtxInput] = useState(null); // 上下文窗口输入中的原始字符串（null=用紧凑显示）
     const [coolInput, setCoolInput] = useState(null); // 失败冷却秒数输入中的原始字符串
     const [chainTest, setChainTest] = useState(null); // 最近一次链路自检结果 {scheme,chain,results,testedAt}
+    const [upstream, setUpstream] = useState({}); // provider -> {models:[],existing:[]} | {error}
+    const [upstreamSel, setUpstreamSel] = useState({}); // provider -> {modelId:boolean}
+    const [upstreamBusy, setUpstreamBusy] = useState(""); // 正在拉取的 provider
 
     const loadModels = async (manual) => {
       if (manual) { setRefreshing(true); setNotice(null); }
@@ -195,6 +198,61 @@
       setLastTestAt(ts);
       saveProbe(out, ts);
       setBusy(false);
+    };
+
+    /**
+     * 拉某供应商上游全目录（GET {baseURL}/models）。
+     * 只有配置型渠道能拉；运行时渠道（qoder/trae/workbuddy）没有可直连的上游目录。
+     */
+    const pullUpstream = async (provider) => {
+      setUpstreamBusy(provider);
+      try {
+        const j = await api("/api/model-pool/upstream", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider }) });
+        if (!j.ok) {
+          setUpstream((p) => ({ ...p, [provider]: { error: j.error || "拉取失败" } }));
+          return;
+        }
+        const existing = Array.isArray(j.existing) ? j.existing : [];
+        const sel = {};
+        for (const id of j.models) sel[id] = existing.includes(id); // 已接入的默认勾上
+        setUpstreamSel((p) => ({ ...p, [provider]: sel }));
+        setUpstream((p) => ({ ...p, [provider]: { models: j.models, existing } }));
+      } catch (e) {
+        setUpstream((p) => ({ ...p, [provider]: { error: String(e?.message || e) } }));
+      } finally {
+        setUpstreamBusy("");
+      }
+    };
+
+    /** 把勾选结果整体写回 DSH 的 llm-pi-ai 配置（不碰链）。 */
+    const applyModels = async (provider) => {
+      const sel = upstreamSel[provider] || {};
+      const ids = Object.keys(sel).filter((id) => sel[id]);
+      if (ids.length === 0) {
+        setNotice({ type: "err", text: "至少要勾选一个模型" });
+        return;
+      }
+      const existing = upstream[provider]?.existing || [];
+      const dropped = existing.filter((id) => !sel[id]);
+      const warn = `将把「${provider}」的模型清单替换为 ${ids.length} 个（原来 ${existing.length} 个）` +
+        (dropped.length > 0 ? `，其中 ${dropped.length} 个会被移出 DSH` : "") +
+        "。当前方案的链不会改动。继续？";
+      if (typeof window !== "undefined" && typeof window.confirm === "function" && !window.confirm(warn)) return;
+      setUpstreamBusy(provider);
+      try {
+        const j = await api("/api/model-pool/apply-models", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider, models: ids }) });
+        if (!j.ok) {
+          setNotice({ type: "err", text: j.error || "写入失败" });
+          return;
+        }
+        setNotice({ type: "ok", text: `${provider} 已接入 ${j.models.length} 个模型${j.backupPath ? "（已备份配置）" : ""}` });
+        setUpstream((p) => { const n = { ...p }; delete n[provider]; return n; });
+        await loadModels(true);
+      } catch (e) {
+        setNotice({ type: "err", text: String(e?.message || e) });
+      } finally {
+        setUpstreamBusy("");
+      }
     };
 
     /**
@@ -295,6 +353,44 @@
       return React.createElement("span", { style: { ...styles.badge, ...s[1] } }, s[0]);
     };
 
+    // 上游目录面板：拉回来的全量模型清单 + 勾选 + 写回 DSH
+    const upstreamPanel = (provider) => {
+      const u = upstream[provider] || {};
+      const sel = upstreamSel[provider] || {};
+      const picked = Object.keys(sel).filter((id) => sel[id]).length;
+      return React.createElement("tr", { key: "up:" + provider },
+        React.createElement("td", { colSpan: 7, style: { ...styles.td, background: "#fbfbfd" } },
+          u.error
+            ? React.createElement("div", { style: { color: "#b42318", fontSize: 12 } }, `拉取上游目录失败：${u.error}`)
+            : React.createElement("div", null,
+                React.createElement("div", { style: { fontSize: 12, color: "#555", marginBottom: 6 } },
+                  `上游目录 ${u.models.length} 个 · 已接入 ${u.existing.length} 个 · 已勾 ${picked} 个`),
+                React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: "4px 14px", maxHeight: 170, overflowY: "auto", padding: "4px 0" } },
+                  u.models.map((id) => React.createElement("label", { key: id, style: { fontSize: 12, display: "inline-flex", alignItems: "center", gap: 4, cursor: "pointer" } },
+                    React.createElement("input", {
+                      type: "checkbox",
+                      checked: !!sel[id],
+                      onChange: () => setUpstreamSel((p) => ({ ...p, [provider]: { ...(p[provider] || {}), [id]: !(p[provider] || {})[id] } }))
+                    }),
+                    id
+                  ))
+                ),
+                React.createElement("div", { style: { marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" } },
+                  React.createElement("button", {
+                    style: { ...styles.btn, ...styles.btnPrimary },
+                    disabled: upstreamBusy === provider || picked === 0,
+                    onClick: () => applyModels(provider)
+                  }, upstreamBusy === provider ? "写入中…" : `接入选中 ${picked} 个（整体替换）`),
+                  React.createElement("button", { style: styles.btn, onClick: () => setUpstreamSel((p) => ({ ...p, [provider]: Object.fromEntries(u.models.map((id) => [id, true])) })) }, "全选"),
+                  React.createElement("button", { style: styles.btn, onClick: () => setUpstreamSel((p) => ({ ...p, [provider]: Object.fromEntries(u.models.map((id) => [id, !(p[provider] || {})[id]])) })) }, "反选"),
+                  React.createElement("button", { style: styles.btn, onClick: () => setUpstream((p) => { const n = { ...p }; delete n[provider]; return n; }) }, "收起"),
+                  React.createElement("span", { style: { fontSize: 11, color: "#999" } }, "写回 DSH 配置，不改动当前方案的链")
+                )
+              )
+        )
+      );
+    };
+
     const providers = [...new Set(models.map((m) => m.provider))];
     const families = [...new Set(models.map((m) => familyOf(m.modelId)))];
     const activeChain = state.schemes?.[state.activeScheme]?.chain || [];
@@ -393,20 +489,28 @@
           const rows = groups[provider];
           const isCol = collapsed[provider] !== false;
           const selCount = rows.filter((r) => checked[r.key]).length;
+          const canPull = rows[0].api === "openai-completions" || rows[0].api === "deepseek";
           const headRow = React.createElement("tr", {
             key: "g:" + provider,
             onClick: () => setCollapsed((p) => ({ ...p, [provider]: p[provider] === false ? true : false })),
             style: { cursor: "pointer", background: "#f7f7f9", fontWeight: 600, userSelect: "none" }
           }, React.createElement("td", { colSpan: 7 },
-            (isCol ? "▶ " : "▼ ") + rows[0].displayName + `（${rows.length} 个模型` + (selCount ? `，已选 ${selCount}` : "") + "）"
+            (isCol ? "▶ " : "▼ ") + rows[0].displayName + `（${rows.length} 个模型` + (selCount ? `，已选 ${selCount}` : "") + "）",
+            canPull ? React.createElement("button", {
+              style: { ...styles.btn, marginLeft: 8, padding: "0 8px", fontWeight: 400 },
+              title: "拉取该供应商上游 /v1/models 全目录，勾选后写回 DSH 配置",
+              disabled: upstreamBusy === provider,
+              onClick: (e) => { e.stopPropagation(); pullUpstream(provider); }
+            }, upstreamBusy === provider ? "拉取中…" : "拉上游") : null
           ));
-          if (isCol) return [headRow];
+          const panel = upstream[provider] ? upstreamPanel(provider) : null;
+          if (isCol) return panel ? [headRow, panel] : [headRow];
           // 每组默认只列前 20 个（330 个模型全渲染会卡），但必须给出口：
           // 原来 `rows.slice(0, 20)` 后面什么都没有，trae(31)/workbuddy-ai(28)/workbuddy4(26)
           // 有 25 个模型在面板里根本勾不到。
           const showAll = autoExpand || expanded[provider] === true;
           const shown = showAll ? rows : rows.slice(0, 20);
-          const out = [headRow, ...shown.map((m) => {
+          const out = [headRow, ...(panel ? [panel] : []), ...shown.map((m) => {
             const unavailable = m.registered === false;
             return React.createElement("tr", { key: m.key, style: { opacity: unavailable ? 0.45 : 1 } },
               React.createElement("td", { style: styles.td }, React.createElement("input", { type: "checkbox", disabled: unavailable, checked: !!checked[m.key], onChange: () => setChecked((p) => ({ ...p, [m.key]: !p[m.key] })) })),
