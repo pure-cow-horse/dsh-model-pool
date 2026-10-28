@@ -133,6 +133,7 @@
     const [upstream, setUpstream] = useState({}); // provider -> {models:[],existing:[]} | {error}
     const [upstreamSel, setUpstreamSel] = useState({}); // provider -> {modelId:boolean}
     const [upstreamBusy, setUpstreamBusy] = useState(""); // 正在拉取的 provider
+    const [upstreamKw, setUpstreamKw] = useState({}); // provider -> 该目录内的搜索词（各供应商互不干扰）
 
     const loadModels = async (manual) => {
       if (manual) { setRefreshing(true); setNotice(null); }
@@ -358,33 +359,62 @@
       const u = upstream[provider] || {};
       const sel = upstreamSel[provider] || {};
       const picked = Object.keys(sel).filter((id) => sel[id]).length;
+      // 目录内搜索：各供应商一份关键词，互不干扰；只影响**显示**，不动已勾集合。
+      const kw = (upstreamKw[provider] || "").trim().toLowerCase();
+      const models = u.models || [];
+      const visible = kw === "" ? models : models.filter((id) => String(id).toLowerCase().includes(kw));
+      const visiblePicked = visible.filter((id) => sel[id]).length;
       return React.createElement("tr", { key: "up:" + provider },
         React.createElement("td", { colSpan: 7, style: { ...styles.td, background: "#fbfbfd" } },
           u.error
             ? React.createElement("div", { style: { color: "#b42318", fontSize: 12 } }, `拉取上游目录失败：${u.error}`)
             : React.createElement("div", null,
                 React.createElement("div", { style: { fontSize: 12, color: "#555", marginBottom: 6 } },
-                  `上游目录 ${u.models.length} 个 · 已接入 ${u.existing.length} 个 · 已勾 ${picked} 个`),
-                React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: "4px 14px", maxHeight: 170, overflowY: "auto", padding: "4px 0" } },
-                  u.models.map((id) => React.createElement("label", { key: id, style: { fontSize: 12, display: "inline-flex", alignItems: "center", gap: 4, cursor: "pointer" } },
-                    React.createElement("input", {
-                      type: "checkbox",
-                      checked: !!sel[id],
-                      onChange: () => setUpstreamSel((p) => ({ ...p, [provider]: { ...(p[provider] || {}), [id]: !(p[provider] || {})[id] } }))
-                    }),
-                    id
-                  ))
-                ),
+                  `上游目录 ${models.length} 个 · 已接入 ${(u.existing || []).length} 个 · 已勾 ${picked} 个`,
+                  kw === "" ? "" : ` · 匹配 ${visible.length} 个`),
+                React.createElement("input", {
+                  style: { ...styles.search, width: 280, height: 26, marginBottom: 6 },
+                  placeholder: "在此目录内搜索模型 id（支持片段）",
+                  value: upstreamKw[provider] || "",
+                  onChange: (e) => setUpstreamKw((p) => ({ ...p, [provider]: e.target.value }))
+                }),
+                visible.length === 0
+                  ? React.createElement("div", { style: { fontSize: 12, color: "#999", padding: "6px 0" } },
+                      kw === "" ? "上游目录为空" : "无匹配的模型")
+                  : React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: "4px 14px", maxHeight: 170, overflowY: "auto", padding: "4px 0" } },
+                      visible.map((id) => React.createElement("label", { key: id, style: { fontSize: 12, display: "inline-flex", alignItems: "center", gap: 4, cursor: "pointer" } },
+                        React.createElement("input", {
+                          type: "checkbox",
+                          checked: !!sel[id],
+                          onChange: () => setUpstreamSel((p) => ({ ...p, [provider]: { ...(p[provider] || {}), [id]: !(p[provider] || {})[id] } }))
+                        }),
+                        id
+                      ))
+                    ),
                 React.createElement("div", { style: { marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" } },
                   React.createElement("button", {
                     style: { ...styles.btn, ...styles.btnPrimary },
                     disabled: upstreamBusy === provider || picked === 0,
                     onClick: () => applyModels(provider)
                   }, upstreamBusy === provider ? "写入中…" : `接入选中 ${picked} 个（整体替换）`),
-                  React.createElement("button", { style: styles.btn, onClick: () => setUpstreamSel((p) => ({ ...p, [provider]: Object.fromEntries(u.models.map((id) => [id, true])) })) }, "全选"),
-                  React.createElement("button", { style: styles.btn, onClick: () => setUpstreamSel((p) => ({ ...p, [provider]: Object.fromEntries(u.models.map((id) => [id, !(p[provider] || {})[id]])) })) }, "反选"),
+                  // 全选/反选只作用于**当前可见**（搜索结果），且与既有选择合并
+                  // —— 否则搜索后点全选会把目录里其它模型的勾选清掉。
+                  React.createElement("button", {
+                    style: styles.btn,
+                    disabled: visible.length === 0,
+                    title: kw === "" ? "勾选目录内全部模型" : "只勾选当前搜索结果",
+                    onClick: () => setUpstreamSel((p) => ({ ...p, [provider]: { ...(p[provider] || {}), ...Object.fromEntries(visible.map((id) => [id, true])) } }))
+                  }, kw === "" ? "全选" : `全选匹配 ${visible.length}`),
+                  React.createElement("button", {
+                    style: styles.btn,
+                    disabled: visible.length === 0,
+                    title: kw === "" ? "反转目录内全部勾选" : "只反转当前搜索结果",
+                    onClick: () => setUpstreamSel((p) => ({ ...p, [provider]: { ...(p[provider] || {}), ...Object.fromEntries(visible.map((id) => [id, !(p[provider] || {})[id]])) } }))
+                  }, "反选"),
                   React.createElement("button", { style: styles.btn, onClick: () => setUpstream((p) => { const n = { ...p }; delete n[provider]; return n; }) }, "收起"),
-                  React.createElement("span", { style: { fontSize: 11, color: "#999" } }, "写回 DSH 配置，不改动当前方案的链")
+                  React.createElement("span", { style: { fontSize: 11, color: "#999" } },
+                    "写回 DSH 配置，不改动当前方案的链",
+                    visiblePicked > 0 && kw !== "" ? `（匹配内已勾 ${visiblePicked}）` : "")
                 )
               )
         )
