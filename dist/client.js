@@ -114,6 +114,7 @@
     const [models, setModels] = useState([]);
     const [results, setResults] = useState({}); // key -> {status,latency,error,code}
     const [testing, setTesting] = useState({}); // key -> true：行内「测」的在途状态，点了立刻有反应
+    const [providerTesting, setProviderTesting] = useState({}); // provider -> { done, total }：组头批量测的进度
     const [lastTestAt, setLastTestAt] = useState(null); // 上次批量测试时间戳
     const [checked, setChecked] = useState({});
     // 表头筛选（2026-10-31）：**每列单选**，列与列之间组合（如 族=DeepSeek 且 免费=是）。
@@ -230,6 +231,48 @@
       setLastTestAt(ts);
       saveProbe(out, ts);
       setBusy(false);
+    };
+
+    /**
+     * 测某个供应商的全部模型（2026-10-31）。
+     *
+     * 「测试全部」是 330 个模型一起打，慢且容易撞限流；实际排障时通常只怀疑
+     * 某一个渠道。所以组头给一个按供应商收敛的入口。
+     *
+     * 几点考虑：
+     * - 目标取**该供应商的全量模型**，不受当前搜索/筛选影响 —— 按钮说的是"这个供应商的全部"；
+     * - 未注册的模型跳过（打过去必然失败，徒增噪音）；
+     * - 并发 4，逐批推进并实时写回结果，组头显示「测中 3/7」；
+     * - 失败也落进 results，和行内「测」共用同一套展示。
+     */
+    const testProvider = async (provider) => {
+      const targets = models.filter((m) => m.provider === provider && m.registered !== false);
+      if (targets.length === 0) return;
+      setProviderTesting((prev) => ({ ...prev, [provider]: { done: 0, total: targets.length } }));
+      const out = { ...results };
+      const conc = 4;
+      for (let i = 0; i < targets.length; i += conc) {
+        await Promise.all(targets.slice(i, i + conc).map(async (m) => {
+          let next;
+          try {
+            const j = await api("/api/model-pool/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: m.key }) });
+            next = j && j.ok === false ? { status: "fail", error: j.error || "接口返回失败" } : j;
+          } catch (error) {
+            next = { status: "fail", error: error instanceof Error ? error.message : String(error) };
+          }
+          out[m.key] = next;
+          setResults({ ...out });
+          setProviderTesting((prev) => ({ ...prev, [provider]: { done: (prev[provider]?.done ?? 0) + 1, total: targets.length } }));
+        }));
+      }
+      const ts = Date.now();
+      setLastTestAt(ts);
+      saveProbe(out, ts);
+      setProviderTesting((prev) => {
+        const next = { ...prev };
+        delete next[provider];
+        return next;
+      });
     };
 
     /**
@@ -938,6 +981,14 @@
             style: { cursor: "pointer", background: "#f7f7f9", fontWeight: 600, userSelect: "none" }
           }, React.createElement("td", { colSpan: 7 },
             (isCol ? "▶ " : "▼ ") + rows[0].displayName + `（${rows.length} 个模型` + (selCount ? `，已选 ${selCount}` : "") + "）",
+            React.createElement("button", {
+              style: { ...styles.btn, marginLeft: 8, padding: "0 8px", fontWeight: 400, ...(providerTesting[provider] !== void 0 ? { color: "#4f46e5" } : {}) },
+              title: "测试该供应商的全部模型（不受搜索/筛选影响）",
+              disabled: providerTesting[provider] !== void 0,
+              onClick: (e) => { e.stopPropagation(); void testProvider(provider); }
+            }, providerTesting[provider] !== void 0
+              ? `测中 ${providerTesting[provider].done}/${providerTesting[provider].total}`
+              : `测全部 ${rows.length}`),
             canPull ? React.createElement("button", {
               style: { ...styles.btn, marginLeft: 8, padding: "0 8px", fontWeight: 400 },
               title: "拉取该供应商上游 /v1/models 全目录，勾选后写回 DSH 配置",
