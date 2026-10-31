@@ -116,8 +116,15 @@
     const [testing, setTesting] = useState({}); // key -> true：行内「测」的在途状态，点了立刻有反应
     const [lastTestAt, setLastTestAt] = useState(null); // 上次批量测试时间戳
     const [checked, setChecked] = useState({});
-    const [filter, setFilter] = useState("all"); // all/ok/provider/family
-    const [filterVal, setFilterVal] = useState("");
+    // 表头筛选（2026-10-31）：**每列单选**，列与列之间组合（如 族=DeepSeek 且 免费=是）。
+    // 同一列再点一次同一个值 = 取消该列筛选。null 表示这一列不设条件。
+    const [columnFilters, setColumnFilters] = useState({ provider: null, family: null, free: null, status: null });
+    const [sortBy, setSortBy] = useState({ key: null, desc: false });
+    // { col, x, y }：点表头时记坐标，面板用 fixed 定位，免得被滚动容器裁掉
+    const [openFilter, setOpenFilter] = useState(null);
+    const [filterKw, setFilterKw] = useState(""); // 面板内搜索（供应商/族 选项多时用）
+    const hasFilters = Object.values(columnFilters).some((v) => v !== null) || sortBy.key !== null;
+    const clearAll = () => { setColumnFilters({ provider: null, family: null, free: null, status: null }); setSortBy({ key: null, desc: false }); };
     const [busy, setBusy] = useState(false);
     const [showUnreg, setShowUnreg] = useState(false); // 默认隐藏未注册供应商，勾选后显示
     const [kw, setKw] = useState(""); // 模型目录搜索词
@@ -353,33 +360,151 @@
       persistChain(next);
     };
 
-    const q = kw.trim().toLowerCase();
-    const filtered = models.filter((m) => {
-      if (!showUnreg && m.registered === false) return false; // 默认隐藏未注册供应商
+    /** 列值：三列取值都收敛成字符串，供筛选/计数/排序共用。 */
+    const familyKeyOf = (m) => familyOf(m.modelId) || "";
+    const freeKeyOf = (m) => m.free === true ? "free" : m.configured ? "paid" : "unknown";
+    const statusKeyOf = (m) => {
+      const st = results[m.key]?.status;
+      return st === "ok" ? "ok" : st === "fail" ? "fail" : "pending";
+    };
+    const columnValueOf = (m, col) => col === "provider" ? m.provider : col === "family" ? familyKeyOf(m) : col === "free" ? freeKeyOf(m) : statusKeyOf(m);
+    const COLUMN_LABEL = { provider: "供应商", family: "族", free: "免费", status: "状态" };
+    const valueLabel = (col, v) => col === "free" ? ({ free: "是", paid: "—", unknown: "?" }[v] ?? v) : col === "status" ? ({ ok: "可用", fail: "失败", pending: "待测" }[v] ?? v) : v === "" ? "（空）" : v;
+    // 排序档位：免费/状态是枚举，按"好的在前"排；其余按文本
+    const SORT_RANK = { free: { free: 0, unknown: 1, paid: 2 }, status: { ok: 0, fail: 1, pending: 2 } };
+    const compareModels = (a, b, sort) => {
+      const dir = sort.desc ? -1 : 1;
+      const rank = SORT_RANK[sort.key];
+      if (rank !== void 0) return ((rank[columnValueOf(a, sort.key)] ?? 9) - (rank[columnValueOf(b, sort.key)] ?? 9)) * dir;
+      return String(columnValueOf(a, sort.key)).localeCompare(String(columnValueOf(b, sort.key)), "zh-CN") * dir;
+    };
+    /**
+     * 一行是否通过筛选。`except` 用于算选项计数：统计某列的选项数量时，
+     * 要忽略这一列自己的筛选，否则选中一项后其它项会全变 0。
+     */
+    const passesFilter = (m, except) => {
+      if (!showUnreg && m.registered === false) return false;
       if (q) {
         const hay = [m.modelId, m.displayName, m.provider, familyOf(m.modelId)].join(" ").toLowerCase();
         if (!hay.includes(q)) return false;
       }
-      if (filter === "ok" && results[m.key]?.status !== "ok") return false;
-      // 免费列显示的是「是 / — / ?」三态，筛选必须用同一套判据，否则筛选结果和列里看到的不一致
-      if (filter === "free" && m.free !== true) return false;
-      if (filter === "paid" && !(m.free !== true && m.configured)) return false;
-      if (filter === "unknown" && (m.free === true || m.configured)) return false;
-      if (filter === "provider" && m.provider !== filterVal) return false;
-      if (filter === "family" && familyOf(m.modelId) !== filterVal) return false;
+      for (const [col, val] of Object.entries(columnFilters)) {
+        if (col === except || val === null) continue;
+        if (columnValueOf(m, col) !== val) return false;
+      }
       return true;
-    });
+    };
+
+    const q = kw.trim().toLowerCase();
+    const filtered = models.filter((m) => passesFilter(m, null));
+    if (sortBy.key !== null) filtered.sort((a, b) => compareModels(a, b, sortBy));
     // 按供应商分组（可折叠）：分组基于全量过滤结果，避免排在后面的渠道组头不出现
     const groups = {};
     for (const m of filtered) (groups[m.provider] = groups[m.provider] || []).push(m);
     const groupKeys = Object.keys(groups);
     // 搜索 / 筛选时自动展开全部分组，避免"搜到了却看不见"（原来固定只渲染前 20 个）
-    const autoExpand = Boolean(q) || filter !== "all";
+    const autoExpand = Boolean(q) || hasFilters;
 
     const badge = (key) => {
       const r = results[key];
       const s = !r ? ["待测", styles.idle] : r.status === "ok" ? ["可用 · " + r.latency + "ms", styles.ok] : r.status === "skip" ? ["跳过", styles.skip] : ["不可用", styles.fail];
       return React.createElement("span", { style: { ...styles.badge, ...s[1] } }, s[0]);
+    };
+
+    // ── 表头筛选（2026-10-31）─────────────────────────────────────────
+    /** 面板里一行的样式：整行可点，选中项左侧圆点 + 浅底。 */
+    const optionRow = { display: "flex", alignItems: "center", gap: 8, padding: "5px 12px", cursor: "pointer", userSelect: "none" };
+
+    /** 可筛表头：有筛选/排序时高亮，并把当前值写在列名后面。 */
+    const filterHeader = (col) => {
+      const picked = columnFilters[col];
+      const sorted = sortBy.key === col;
+      const active = picked !== null || sorted;
+      return React.createElement("th", {
+        key: col,
+        style: { ...styles.th, cursor: "pointer", whiteSpace: "nowrap", color: active ? "#4f46e5" : void 0 },
+        onClick: (e) => {
+          e.stopPropagation();
+          setFilterKw("");
+          setOpenFilter((prev) => prev !== null && prev.col === col ? null : { col, x: e.clientX, y: e.clientY });
+        },
+        title: "点击筛选 / 排序"
+      }, COLUMN_LABEL[col],
+        React.createElement("span", { style: { marginLeft: 4, fontSize: 10, color: active ? "#4f46e5" : "#bbb" } }, sorted ? (sortBy.desc ? "▼" : "▲") : "▾"),
+        picked !== null && React.createElement("span", { style: { marginLeft: 4, fontSize: 11, fontWeight: 400 } }, valueLabel(col, picked)));
+    };
+
+    /** 某列的候选值 + 行数。计数时忽略该列自己的条件，否则选中一项后其它项会全变 0。 */
+    const optionsFor = (col) => {
+      const counts = /* @__PURE__ */ new Map();
+      let total = 0;
+      for (const m of models) {
+        if (!passesFilter(m, col)) continue;
+        total += 1;
+        const value = columnValueOf(m, col);
+        counts.set(value, (counts.get(value) ?? 0) + 1);
+      }
+      const picked = columnFilters[col];
+      if (picked !== null && !counts.has(picked)) counts.set(picked, 0); // 选中的值即使 0 条也留着
+      const rank = SORT_RANK[col];
+      const options = [...counts.entries()]
+        .map(([value, count]) => ({ value, count, label: valueLabel(col, value) }))
+        .sort((a, b) => rank !== void 0 ? (rank[a.value] ?? 9) - (rank[b.value] ?? 9) : a.label.localeCompare(b.label, "zh-CN"));
+      return { total, options };
+    };
+
+    /** 点表头后的浮层。用 fixed + 点击坐标定位，避免被表格的滚动容器裁掉。 */
+    const filterPanel = () => {
+      if (openFilter === null) return null;
+      const col = openFilter.col;
+      const { total, options } = optionsFor(col);
+      const kw2 = filterKw.trim().toLowerCase();
+      const shown = kw2 === "" ? options : options.filter((o) => o.label.toLowerCase().includes(kw2));
+      const picked = columnFilters[col];
+      const pick = (value) => setColumnFilters((prev) => ({ ...prev, [col]: prev[col] === value ? null : value }));
+      const vw = typeof window === "undefined" ? 1200 : window.innerWidth;
+      const vh = typeof window === "undefined" ? 800 : window.innerHeight;
+      const left = Math.max(8, Math.min(openFilter.x - 24, vw - 246));
+      const top = Math.max(8, Math.min(openFilter.y + 10, vh - 340));
+      return React.createElement(React.Fragment, null,
+        // 透明遮罩：点面板外关闭
+        React.createElement("div", { style: { position: "fixed", inset: 0, zIndex: 40 }, onClick: () => setOpenFilter(null) }),
+        React.createElement("div", { style: { position: "fixed", left, top, width: 238, zIndex: 41, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, boxShadow: "0 10px 28px rgba(0,0,0,.12)", fontSize: 12, overflow: "hidden" } },
+          React.createElement("div", { style: { padding: "8px 12px", color: "#6b7280", fontSize: 11, borderBottom: "1px solid #f3f4f6", display: "flex", justifyContent: "space-between" } },
+            React.createElement("span", null, COLUMN_LABEL[col]),
+            React.createElement("span", { style: { cursor: "pointer", color: "#9ca3af" }, onClick: () => setOpenFilter(null) }, "关闭")),
+          options.length > 12 && React.createElement("div", { style: { padding: "6px 10px", borderBottom: "1px solid #f3f4f6" } },
+            React.createElement("input", {
+              style: { ...styles.search, width: "100%", boxSizing: "border-box" },
+              placeholder: "搜索…", value: filterKw, autoFocus: true,
+              onChange: (e) => setFilterKw(e.target.value)
+            })),
+          React.createElement("div", { style: { maxHeight: 240, overflowY: "auto", padding: "4px 0" } },
+            React.createElement("div", {
+              style: { ...optionRow, color: picked === null ? "#4f46e5" : "#6b7280" },
+              onClick: () => setColumnFilters((prev) => ({ ...prev, [col]: null }))
+            },
+              React.createElement("span", { style: { width: 10, textAlign: "center" } }, picked === null ? "●" : ""),
+              React.createElement("span", { style: { flex: 1 } }, "全部"),
+              React.createElement("span", { style: { color: "#9ca3af", fontSize: 11 } }, total)),
+            ...shown.map((opt) => React.createElement("div", {
+              key: opt.value,
+              style: { ...optionRow, background: picked === opt.value ? "#eef2ff" : void 0, opacity: opt.count === 0 && picked !== opt.value ? 0.5 : 1 },
+              onClick: () => pick(opt.value)
+            },
+              React.createElement("span", { style: { width: 10, textAlign: "center", color: "#4f46e5" } }, picked === opt.value ? "●" : ""),
+              React.createElement("span", { style: { flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, opt.label),
+              React.createElement("span", { style: { color: "#9ca3af", fontSize: 11 } }, opt.count))),
+            kw2 !== "" && shown.length === 0 && React.createElement("div", { style: { padding: "10px 12px", color: "#9ca3af" } }, "没有匹配的选项")),
+          React.createElement("div", { style: { borderTop: "1px solid #f3f4f6", padding: "6px 10px", display: "flex", gap: 6, alignItems: "center" } },
+            React.createElement("button", { style: { ...styles.btn, height: 22, padding: "0 8px", fontSize: 11, ...(sortBy.key === col && !sortBy.desc ? styles.btnPrimary : {}) }, onClick: () => setSortBy({ key: col, desc: false }) }, "升序 ↑"),
+            React.createElement("button", { style: { ...styles.btn, height: 22, padding: "0 8px", fontSize: 11, ...(sortBy.key === col && sortBy.desc ? styles.btnPrimary : {}) }, onClick: () => setSortBy({ key: col, desc: true }) }, "降序 ↓"),
+            React.createElement("span", { style: { flex: 1 } }),
+            React.createElement("button", {
+              style: { ...styles.btn, height: 22, padding: "0 8px", fontSize: 11 },
+              onClick: () => { setColumnFilters((prev) => ({ ...prev, [col]: null })); setSortBy((prev) => prev.key === col ? { key: null, desc: false } : prev); }
+            }, "清除")))
+      );
     };
 
     // 上游目录面板：拉回来的全量模型清单 + 勾选 + 写回 DSH
@@ -773,27 +898,20 @@
         React.createElement("button", { style: { ...styles.btn, ...styles.btnPrimary }, onClick: () => loadModels(true), disabled: refreshing }, refreshing ? "刷新中…" : "刷新目录"),
         React.createElement("button", { style: styles.btn, onClick: testAll, disabled: busy }, busy ? "测试中…" : "测试全部"),
         React.createElement("input", { style: styles.search, placeholder: "搜索模型 / 供应商 / 族", value: kw, onChange: (e) => setKw(e.target.value) }),
-        React.createElement("select", { style: styles.select, value: filter, onChange: (e) => setFilter(e.target.value) },
-          React.createElement("option", { value: "all" }, "全部"),
-          React.createElement("option", { value: "ok" }, "仅可用"),
-          React.createElement("option", { value: "free" }, "仅免费"),
-          React.createElement("option", { value: "paid" }, "仅非免费"),
-          React.createElement("option", { value: "unknown" }, "免费未知"),
-          React.createElement("option", { value: "provider" }, "按供应商"),
-          React.createElement("option", { value: "family" }, "按模型族")
-        ),
-        // 只有「按供应商 / 按模型族」才需要第二个下拉；免费三态是自足的，别给它多挂一个空控件
-        (filter === "provider" || filter === "family") && React.createElement("select", { style: styles.select, value: filterVal, onChange: (e) => setFilterVal(e.target.value) },
-          (filter === "provider" ? providers : families).map((v) => React.createElement("option", { key: v, value: v }, v))
-        ),
+        // 筛选已搬到表头（点列名弹出），顶部不再保留第二套入口
         React.createElement("button", { style: styles.btn, onClick: toggleAll }, allCollapsed ? "全部展开" : "全部折叠"),
         React.createElement("label", { style: { fontSize: 12, display: "flex", alignItems: "center", gap: 4, cursor: "pointer", whiteSpace: "nowrap" } },
           React.createElement("input", { type: "checkbox", checked: showUnreg, onChange: (e) => setShowUnreg(e.target.checked) }),
           "显示未注册"
         )
       ),
-      React.createElement("div", { style: { fontSize: 12, color: "#888", margin: "4px 0 10px", display: "flex", alignItems: "center", gap: 10 } },
-        React.createElement("span", null, q || filter !== "all" ? `匹配 ${filtered.length} / 共 ${models.length} 个模型` : `共 ${models.length} 个模型`),
+      React.createElement("div", { style: { fontSize: 12, color: "#888", margin: "4px 0 10px", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" } },
+        React.createElement("span", null, q || hasFilters ? `匹配 ${filtered.length} / 共 ${models.length} 个模型` : `共 ${models.length} 个模型`),
+        // 把"筛了什么"写在明面上：否则「怎么只有 12 个模型」永远没有答案
+        ...Object.entries(columnFilters).filter(([, v]) => v !== null).map(([col, v]) =>
+          React.createElement("span", { key: col, style: { padding: "1px 8px", borderRadius: 10, fontSize: 11, background: "#eef2ff", color: "#4f46e5" } }, `${COLUMN_LABEL[col]} · ${valueLabel(col, v)}`)),
+        sortBy.key !== null && React.createElement("span", { style: { padding: "1px 8px", borderRadius: 10, fontSize: 11, background: "#f4f4f5", color: "#52525b" } }, `排序 ${COLUMN_LABEL[sortBy.key]} ${sortBy.desc ? "↓" : "↑"}`),
+        hasFilters && React.createElement("button", { style: { ...styles.btn, height: 20, padding: "0 8px", fontSize: 11 }, onClick: clearAll }, "清除全部"),
         notice && React.createElement("span", { style: { ...styles.notice, ...(notice.type === "ok" ? styles.noticeOk : styles.noticeErr) } }, notice.text),
         lastTestAt && React.createElement("span", { style: { fontSize: 12, color: "#999" }, title: new Date(lastTestAt).toLocaleString() },
           `上次测试 ${new Date(lastTestAt).toLocaleTimeString()}`)
@@ -802,11 +920,11 @@
       React.createElement("table", { style: styles.table },
         React.createElement("thead", null, React.createElement("tr", null,
           React.createElement("th", { style: styles.th }, "选"),
-          React.createElement("th", { style: styles.th }, "供应商"),
+          filterHeader("provider"),
           React.createElement("th", { style: styles.th }, "模型"),
-          React.createElement("th", { style: styles.th }, "族"),
-          React.createElement("th", { style: styles.th }, "免费"),
-          React.createElement("th", { style: styles.th }, "状态"),
+          filterHeader("family"),
+          filterHeader("free"),
+          filterHeader("status"),
           React.createElement("th", { style: styles.th }, "操作")
         )),
         React.createElement("tbody", null, groupKeys.flatMap((provider) => {
@@ -881,7 +999,11 @@
           return out;
         }))
       ),
-      )
+      ),
+      filtered.length === 0 && React.createElement("div", { style: { padding: "22px 12px", textAlign: "center", fontSize: 12, color: "#888" } },
+        "没有符合条件的模型 ",
+        React.createElement("button", { style: { ...styles.btn, marginLeft: 8, height: 22, padding: "0 8px", fontSize: 11 }, onClick: clearAll }, "清除筛选")),
+      filterPanel()
     );
 
     // 链路自检小结：只在「刚测过的方案」仍是当前激活方案时显示，切走就不误导
