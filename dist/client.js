@@ -134,6 +134,7 @@
     const [usageBusy, setUsageBusy] = useState(false);
     const [usageSpan, setUsageSpan] = useState(7); // 1 / 7 / 30
     const [sorting, setSorting] = useState({ key: "total", desc: true });
+    const [sourceFilter, setSourceFilter] = useState("all"); // all | pool | direct
     const [upstream, setUpstream] = useState({}); // provider -> {models:[],existing:[]} | {error}
     const [upstreamSel, setUpstreamSel] = useState({}); // provider -> {modelId:boolean}
     const [upstreamBusy, setUpstreamBusy] = useState(""); // 正在拉取的 provider
@@ -544,7 +545,9 @@
       if (usage === null || typeof document === "undefined") return;
       const head = ["日期", "来源", "渠道", "模型", "请求", "失败", "输入(未缓存)", "缓存读", "缓存写", "输出", "合计"];
       const lines = [head.join(",")];
-      for (const row of usage.rows || []) {
+      // 导出跟着筛选走：看到什么就导出什么，否则"我筛了直连、导出来却是全部"更费解
+      const exportRows = (usage.rows || []).filter((row) => sourceFilter === "all" || row.source === sourceFilter);
+      for (const row of exportRows) {
         lines.push([row.day, row.source === "pool" ? "池子" : "直连", row.provider, row.model,
           usageNum(row.requests), row.errors === undefined ? "" : usageNum(row.errors),
           usageNum(row.uncachedInputTokens), usageNum(row.cacheReadTokens), usageNum(row.cacheWriteTokens),
@@ -555,7 +558,7 @@
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `模型池用量_${usage.today || "today"}_${usage.days || ""}天.csv`;
+      a.download = `模型池用量_${usage.today || "today"}_${usage.days || ""}天${sourceFilter === "all" ? "" : "_" + (sourceFilter === "pool" ? "池子" : "直连")}.csv`;
       a.click();
       URL.revokeObjectURL(url);
     };
@@ -577,17 +580,41 @@
         }, label)),
         React.createElement("button", { style: styles.btn, onClick: () => void loadUsage(), disabled: usageBusy }, usageBusy ? "读取中…" : "刷新"),
         React.createElement("button", { style: styles.btn, onClick: exportUsage, disabled: usage === null }, "导出 CSV"),
+        // 来源筛选：只影响"读的数字"（概览/按模型/逐日），对账那行始终全量
+        React.createElement("span", { style: { fontSize: 11, color: "#888", marginLeft: 4 } }, "来源"),
+        ...[["all", "全部"], ["pool", "池子"], ["direct", "直连"]].map(([value, label]) =>
+          React.createElement("button", {
+            key: value,
+            style: { ...styles.btn, height: 24, padding: "0 10px", ...(sourceFilter === value ? styles.btnPrimary : {}) },
+            onClick: () => setSourceFilter(value)
+          }, label)),
         React.createElement("span", { style: { fontSize: 11, color: "#999" } }, "池子=走池子的请求；直连=直接选模型，从会话日志回放")
       ),
       usage === null
         ? React.createElement("div", { style: { color: "#888", fontSize: 12 } },
             usageBusy ? "正在回放会话日志，第一次会慢几秒…" : "还没有数据，点「刷新」读一次")
         : (() => {
-            const overall = usage.totals?.overall ?? {};
-            const days = usage.totals?.byDay ?? [];
-            const modelRows = usageModelRows(usage.rows);
-            const directCount = (usage.rows || []).filter((row) => row.source === "direct").length;
-            const poolCount = (usage.rows || []).filter((row) => row.source === "pool").length;
+            const allRows = usage.rows || [];
+            const rows = sourceFilter === "all" ? allRows : allRows.filter((row) => row.source === sourceFilter);
+            // 概览与逐日都从**过滤后**的行重算：筛选的意义就是"只看这一份"
+            const overall = rows.reduce((acc, row) => {
+              for (const field of ["requests", "errors", "uncachedInputTokens", "cacheReadTokens", "cacheWriteTokens", "outputTokens"]) {
+                acc[field] = (acc[field] ?? 0) + usageNum(row[field]);
+              }
+              return acc;
+            }, {});
+            const dayMap = /* @__PURE__ */ new Map();
+            for (const row of rows) {
+              const bucket = dayMap.get(row.day) ?? { day: row.day, requests: 0, errors: 0, uncachedInputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0 };
+              for (const field of ["requests", "errors", "uncachedInputTokens", "cacheReadTokens", "cacheWriteTokens", "outputTokens"]) {
+                bucket[field] += usageNum(row[field]);
+              }
+              dayMap.set(row.day, bucket);
+            }
+            const days = [...dayMap.values()].sort((a, b) => (a.day < b.day ? 1 : -1));
+            const modelRows = usageModelRows(rows);
+            const directCount = allRows.filter((row) => row.source === "direct").length;
+            const poolCount = allRows.filter((row) => row.source === "pool").length;
             const replay = usage.reconcile?.replay ?? {};
             const maxDay = days.reduce((acc, day) => Math.max(acc, usageTotal(day)), 0);
             return React.createElement(React.Fragment, null,
@@ -600,7 +627,7 @@
                 React.createElement("div", { style: { fontSize: 12, color: "#666" } },
                   `输入 ${fmtNum(overall.uncachedInputTokens)} · 缓存读 ${fmtNum(overall.cacheReadTokens)} · 输出 ${fmtNum(overall.outputTokens)}`),
                 React.createElement("div", { style: { fontSize: 11, color: "#999", marginTop: 2 } },
-                  `来源：池子 ${fmtNum(poolCount)} 行 / 直连 ${fmtNum(directCount)} 行` + (typeof usage.days === "number" ? ` · 范围 ${usage.days} 天` : ""))
+                  `来源：池子 ${fmtNum(poolCount)} 行 / 直连 ${fmtNum(directCount)} 行` + (sourceFilter === "all" ? "" : ` · 当前只看${sourceFilter === "pool" ? "池子" : "直连"}`) + (typeof usage.days === "number" ? ` · 范围 ${usage.days} 天` : ""))
               ),
               // ② 按模型
               React.createElement("div", { style: { fontWeight: 600, marginBottom: 6 } }, "按模型"),
@@ -655,7 +682,7 @@
               ),
               // ④ 对账
               React.createElement("div", { style: { marginTop: 14, paddingTop: 8, borderTop: "1px solid #eee", fontSize: 11, color: "#888", lineHeight: 1.7 } },
-                `数据覆盖：池子 ${fmtCompact(usage.reconcile?.poolTokens ?? 0)} + 直连 ${fmtCompact(usage.reconcile?.directTokens ?? 0)} = ${fmtCompact(usageTotal(overall))} tokens`,
+                `数据覆盖（不受筛选影响）：池子 ${fmtCompact(usage.reconcile?.poolTokens ?? 0)} + 直连 ${fmtCompact(usage.reconcile?.directTokens ?? 0)} = ${fmtCompact((usage.reconcile?.poolTokens ?? 0) + (usage.reconcile?.directTokens ?? 0))} tokens`,
                 React.createElement("br"),
                 `回放：扫 ${fmtNum(replay.files)} 个会话文件 · 解析 ${fmtNum(replay.parsed)} · 跳过 ${fmtNum(replay.skipped)}（不在范围内）· 失败 ${fmtNum(replay.failed)} · 记录 ${fmtNum(replay.records)} 条 · 耗时 ${fmtNum(replay.tookMs)}ms`
               )
