@@ -84,7 +84,10 @@
     noticeOk: { color: "#1a7f37" },
     noticeErr: { color: "#c0392b" },
     table: { width: "100%", borderCollapse: "collapse", fontSize: 12 },
-    th: { textAlign: "left", padding: "6px 8px", borderBottom: "1px solid #eee", fontWeight: 600 },
+    // 表头吸顶：模型列表与用量表都在 overflow 容器里，往下拉会看不见列名（2026-10-31）。
+    // borderCollapse: collapse 的表格里，sticky 元素的 borderBottom 在滚动时会被吃掉，
+    // 所以再叠一层 inset boxShadow 画那条线。
+    th: { textAlign: "left", padding: "6px 8px", borderBottom: "1px solid #eee", fontWeight: 600, position: "sticky", top: 0, zIndex: 3, background: "#fff", boxShadow: "inset 0 -1px 0 #eee" },
     td: { padding: "6px 8px", borderBottom: "1px solid #f3f3f3" },
     badge: { padding: "2px 8px", borderRadius: 10, fontSize: 11 },
     ok: { background: "#e6f7ea", color: "#1a7f37" },
@@ -110,6 +113,7 @@
     const { useState, useEffect, useRef } = getReact();
     const [models, setModels] = useState([]);
     const [results, setResults] = useState({}); // key -> {status,latency,error,code}
+    const [testing, setTesting] = useState({}); // key -> true：行内「测」的在途状态，点了立刻有反应
     const [lastTestAt, setLastTestAt] = useState(null); // 上次批量测试时间戳
     const [checked, setChecked] = useState({});
     const [filter, setFilter] = useState("all"); // all/ok/provider/family
@@ -183,10 +187,25 @@
     useEffect(() => { loadModels(); loadState(); loadCurrent(); loadProbe(); }, []);
 
     const testOne = async (key) => {
-      const j = await api("/api/model-pool/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key }) });
-      const n = { ...results, [key]: j };
-      setResults(n);
-      saveProbe(n);
+      // 点了没反应是最糟的反馈：这里先置位（按钮变「测中…」），失败也要写进 results，
+      // 原来没有 try/catch —— 接口一 500 就是未处理的 rejection，界面上什么都不发生。
+      setTesting((prev) => ({ ...prev, [key]: true }));
+      try {
+        const j = await api("/api/model-pool/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key }) });
+        const n = { ...results, [key]: j && j.ok === false ? { status: "fail", error: j.error || "接口返回失败" } : j };
+        setResults(n);
+        saveProbe(n);
+      } catch (error) {
+        const n = { ...results, [key]: { status: "fail", error: error instanceof Error ? error.message : String(error) } };
+        setResults(n);
+        saveProbe(n);
+      } finally {
+        setTesting((prev) => {
+          const next = { ...prev };
+          delete next[key];
+          return next;
+        });
+      }
     };
     const testAll = async () => {
       setBusy(true);
@@ -821,7 +840,22 @@
               React.createElement("td", { style: styles.td }, familyOf(m.modelId)),
               React.createElement("td", { style: styles.td }, m.free ? "是" : m.configured ? "—" : "?"),
               React.createElement("td", { style: styles.td }, badge(m.key)),
-              React.createElement("td", { style: styles.td }, unavailable ? "未注册" : React.createElement("button", { style: styles.btn, onClick: () => testOne(m.key) }, "测"))
+              React.createElement("td", { style: styles.td }, unavailable ? "未注册" : React.createElement(React.Fragment, null,
+                React.createElement("button", {
+                  style: styles.btn,
+                  disabled: testing[m.key] === true,
+                  onClick: () => void testOne(m.key)
+                }, testing[m.key] === true ? "测中…" : "测"),
+                // 结果贴在按钮右边：原来只改「状态」列，行一长就看不见
+                (() => {
+                  if (testing[m.key] === true) return null;
+                  const r = results[m.key];
+                  if (!r) return null;
+                  return r.status === "ok"
+                    ? React.createElement("span", { style: { marginLeft: 6, fontSize: 11, color: "#1a7f37" } }, `${r.latency}ms`)
+                    : React.createElement("span", { style: { marginLeft: 6, fontSize: 11, color: "#c0392b" }, title: r.error || "" }, "失败");
+                })()
+              ))
             );
           })];
           if (rows.length > 20) {
