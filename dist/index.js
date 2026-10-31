@@ -1237,8 +1237,43 @@ function apply(ctx) {
   }
 
   try {
-  // 逐路由容错：热重载重复执行时 duplicate 路由跳过，不中断其余注册
-  const reg = (opts) => { try { ctx.webServer.register(opts); diag(`route registered ${opts.path}`); } catch (e) { if (/duplicate/i.test(e?.message || "")) { diag(`route dup skip ${opts.path}`); } else throw e; } };
+  /**
+   * 路由的注销句柄（2026-10-31）。
+   *
+   * `webServer.register()` 返回一个 disposer，调用它就把那条路由摘掉。旧代码把返回值
+   * 丢了 —— 等于注册完没有任何人负责注销。后果在软重启时暴露：旧实例的路由还留在表里，
+   * 新实例注册同名路径撞 `duplicate`，被这里静默跳过，于是**旧 handler 继续服务**，
+   * 页面上表现为"代码明明改了却没生效"。
+   *
+   * 现在收好每一条，插件被销毁时统一释放（见下面的 `ctx.effect`）。
+   */
+  const routeDisposers = [];
+  /** 撞车但没抛出来的路径，供 `/current` 诊断用：静默比报错更难查。 */
+  const routeConflicts = [];
+  const reg = (opts) => {
+    try {
+      const dispose = ctx.webServer.register(opts);
+      if (typeof dispose === "function") routeDisposers.push(dispose);
+      diag(`route registered ${opts.path}`);
+    } catch (e) {
+      if (!/duplicate/i.test(e?.message || "")) throw e;
+      // 不再静默：把冲突路径记下来并写进诊断日志。抛出去会连带打死整块面板，
+      // 但"看起来正常其实是旧代码"更难查，所以两件事都做：留痕 + 继续。
+      routeConflicts.push(opts.path);
+      diag(`route dup ${opts.path}（旧实例未释放？见 unlag-reload.log）`);
+    }
+  };
+  // 实例销毁时按注册的逆序摘掉，避免路由泄漏到下一个实例
+  ctx.effect(() => () => {
+    for (let index = routeDisposers.length - 1; index >= 0; index -= 1) {
+      try {
+        routeDisposers[index]();
+      } catch {
+        /* 单个摘不掉不影响其余 */
+      }
+    }
+    routeDisposers.length = 0;
+  });
 
   // 运行时动态 adapter（qoder1/trae/workbuddy 等 registerAdapter 注册的渠道）枚举：
   // listProviders + listModels，单个 provider 失败跳过，不阻塞整体。
@@ -1702,7 +1737,7 @@ function apply(ctx) {
     path: "/api/model-pool/current",
     handler: async (_req, res) => {
       try {
-        sendJson(res, 200, { ok: true, status: typeof adapter.status === "function" ? adapter.status() : null });
+        sendJson(res, 200, { ok: true, status: typeof adapter.status === "function" ? adapter.status() : null, routeConflicts });
       } catch (e) { sendJson(res, 500, { ok: false, error: e.message }); }
     }
   });
