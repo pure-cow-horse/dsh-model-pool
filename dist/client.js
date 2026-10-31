@@ -130,6 +130,8 @@
     const [ctxInput, setCtxInput] = useState(null); // 上下文窗口输入中的原始字符串（null=用紧凑显示）
     const [coolInput, setCoolInput] = useState(null); // 失败冷却秒数输入中的原始字符串
     const [chainTest, setChainTest] = useState(null); // 最近一次链路自检结果 {scheme,chain,results,testedAt}
+    const [usage, setUsage] = useState(null); // 用量页：{today, entries, days:[{day,entries}]}
+    const [usageBusy, setUsageBusy] = useState(false);
     const [upstream, setUpstream] = useState({}); // provider -> {models:[],existing:[]} | {error}
     const [upstreamSel, setUpstreamSel] = useState({}); // provider -> {modelId:boolean}
     const [upstreamBusy, setUpstreamBusy] = useState(""); // 正在拉取的 provider
@@ -473,9 +475,126 @@
       else setCollapsed(Object.fromEntries(groupKeys.map((k) => [k, true])));
     };
 
+
+    //#region 用量页
+    /**
+     * 每日 × 模型 的 token 台账（2026-10-31）。
+     *
+     * 数据来自宿主的 `/api/model-pool/usage`，源头是模型池在候选流里拦到的 `usage` 块。
+     * 所以：**只统计走模型池的请求**；token 由上游回报，没回报就不瞎补。
+     */
+    const usageNum = (v) => typeof v === "number" && Number.isFinite(v) ? v : 0;
+    const usageTotal = (e) => usageNum(e.uncachedInputTokens) + usageNum(e.cacheReadTokens) + usageNum(e.cacheWriteTokens) + usageNum(e.outputTokens);
+    const fmtNum = (v) => usageNum(v).toLocaleString("zh-CN");
+    const usageLabel = (key, entry) => {
+      const model = entry && typeof entry.model === "string" && entry.model !== "" ? entry.model : String(key).split("/").slice(1).join("/");
+      return { provider: String(key).split("/")[0], model: model || String(key) };
+    };
+    const usageRows = (entries) => Object.entries(entries || {})
+      .map(([key, entry]) => ({ key, entry, ...usageLabel(key, entry) }))
+      .sort((a, b) => usageTotal(b.entry) - usageTotal(a.entry));
+
+    const loadUsage = async () => {
+      setUsageBusy(true);
+      try {
+        const response = await fetch("/api/model-pool/usage?days=7");
+        const body = await response.json().catch(() => undefined);
+        if (body !== undefined && body.ok === true) setUsage(body);
+      } catch {
+        /* 只读页面：失败就留着上一次的数据，不要清空成白板 */
+      } finally {
+        setUsageBusy(false);
+      }
+    };
+
+    /** 导出 CSV：一天一行，模型维度全展开，方便丢进 Excel / Python 分析。 */
+    const exportUsage = () => {
+      if (usage === null || typeof document === "undefined") return;
+      const head = ["日期", "渠道", "模型", "请求", "失败", "输入(未缓存)", "缓存读", "缓存写", "输出", "方案"];
+      const lines = [head.join(",")];
+      for (const day of usage.days || []) {
+        for (const row of usageRows(day.entries).reverse()) {
+          lines.push([day.day, row.provider, row.model,
+            usageNum(row.entry.requests), usageNum(row.entry.errors),
+            usageNum(row.entry.uncachedInputTokens), usageNum(row.entry.cacheReadTokens),
+            usageNum(row.entry.cacheWriteTokens), usageNum(row.entry.outputTokens),
+            row.entry.scheme || ""].join(","));
+        }
+      }
+      // BOM：不带的 CSV 在 Excel 里中文会变乱码
+      const blob = new Blob(["\ufeff" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `模型池用量_${usage.today || "today"}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    };
+
+    const usagePane = React.createElement("div", { style: { ...styles.schemeBox, maxHeight: "calc(100vh - 150px)", overflowY: "auto" } },
+      React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" } },
+        React.createElement("div", { style: { fontWeight: 600 } }, "每日用量（今天 " + (usage === null ? "—" : usage.today) + "）"),
+        React.createElement("button", { style: styles.btn, onClick: loadUsage, disabled: usageBusy }, usageBusy ? "读取中…" : "刷新"),
+        React.createElement("button", { style: styles.btn, onClick: exportUsage, disabled: usage === null }, "导出 CSV"),
+        React.createElement("span", { style: { fontSize: 11, color: "#999" } }, "只统计走模型池的请求；token 由上游回报，缓存读单列")
+      ),
+      usage === null
+        ? React.createElement("div", { style: { color: "#888", fontSize: 12 } }, usageBusy ? "读取中…" : "还没有数据，点「刷新」读一次")
+        : React.createElement(React.Fragment, null,
+            (() => {
+              const rows = usageRows(usage.entries);
+              if (rows.length === 0) {
+                return React.createElement("div", { style: { color: "#888", fontSize: 12, marginBottom: 12 } }, "今天还没有请求记录");
+              }
+              return React.createElement("table", { style: styles.table },
+                React.createElement("thead", null, React.createElement("tr", null,
+                  ["渠道 / 模型", "请求", "失败", "输入(未缓存)", "缓存读", "输出", "合计", "时段"].map((h) =>
+                    React.createElement("th", { key: h, style: styles.th }, h)))),
+                React.createElement("tbody", null, rows.map((row) =>
+                  React.createElement("tr", { key: row.key },
+                    React.createElement("td", { style: styles.td }, React.createElement("b", null, row.model), React.createElement("span", { style: { color: "#999", marginLeft: 6, fontSize: 11 } }, row.provider)),
+                    React.createElement("td", { style: styles.td }, fmtNum(row.entry.requests)),
+                    React.createElement("td", { style: { ...styles.td, color: usageNum(row.entry.errors) > 0 ? "#c0392b" : "#999" } }, fmtNum(row.entry.errors)),
+                    React.createElement("td", { style: styles.td }, fmtNum(row.entry.uncachedInputTokens)),
+                    React.createElement("td", { style: styles.td }, fmtNum(row.entry.cacheReadTokens)),
+                    React.createElement("td", { style: styles.td }, fmtNum(row.entry.outputTokens)),
+                    React.createElement("td", { style: { ...styles.td, fontWeight: 600 } }, fmtNum(usageTotal(row.entry))),
+                    React.createElement("td", { style: { ...styles.td, color: "#999", fontSize: 11 } }, `${row.entry.firstAt || ""}–${row.entry.lastAt || ""}`)
+                  )))
+              );
+            })(),
+            React.createElement("div", { style: { fontWeight: 600, margin: "14px 0 6px" } }, "近 7 天"),
+            React.createElement("table", { style: styles.table },
+              React.createElement("thead", null, React.createElement("tr", null,
+                ["日期", "请求", "失败", "输入(未缓存)", "缓存读", "输出", "合计"].map((h) =>
+                  React.createElement("th", { key: h, style: styles.th }, h)))),
+              React.createElement("tbody", null, (usage.days || []).map((day) => {
+                const list = Object.values(day.entries || {});
+                const sum = (pick) => list.reduce((acc, e) => acc + usageNum(pick(e)), 0);
+                const total = sum((e) => usageTotal(e));
+                return React.createElement("tr", { key: day.day },
+                  React.createElement("td", { style: styles.td }, day.day),
+                  React.createElement("td", { style: styles.td }, fmtNum(sum((e) => e.requests))),
+                  React.createElement("td", { style: { ...styles.td, color: sum((e) => e.errors) > 0 ? "#c0392b" : "#999" } }, fmtNum(sum((e) => e.errors))),
+                  React.createElement("td", { style: styles.td }, fmtNum(sum((e) => e.uncachedInputTokens))),
+                  React.createElement("td", { style: styles.td }, fmtNum(sum((e) => e.cacheReadTokens))),
+                  React.createElement("td", { style: styles.td }, fmtNum(sum((e) => e.outputTokens))),
+                  React.createElement("td", { style: { ...styles.td, fontWeight: 600 } }, fmtNum(total))
+                );
+              }))
+            )
+          )
+    );
+    //#endregion
+
     const tabBar = React.createElement("div", { style: styles.tabs },
       React.createElement("button", { style: { ...styles.tabBtn, ...(tab === "models" ? styles.tabBtnActive : {}) }, onClick: () => setTab("models") }, "模型列表"),
-      React.createElement("button", { style: { ...styles.tabBtn, ...(tab === "schemes" ? styles.tabBtnActive : {}) }, onClick: () => setTab("schemes") }, "方案与链路")
+      React.createElement("button", { style: { ...styles.tabBtn, ...(tab === "schemes" ? styles.tabBtnActive : {}) }, onClick: () => setTab("schemes") }, "方案与链路"),
+      React.createElement("button", {
+        style: { ...styles.tabBtn, ...(tab === "usage" ? styles.tabBtnActive : {}) },
+        // 第一次进页签才拉数据：它不该参与面板首屏的请求
+        onClick: () => { setTab("usage"); if (usage === null) void loadUsage(); }
+      }, "用量统计")
     );
 
     /**
@@ -750,7 +869,7 @@
 
     return React.createElement("div", { style: styles.wrap },
       tabBar,
-      tab === "models" ? modelsPane : schemesPane
+      tab === "models" ? modelsPane : tab === "usage" ? usagePane : schemesPane
     );
   }
 

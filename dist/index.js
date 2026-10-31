@@ -23,6 +23,182 @@ function dshHome() {
   return process.env.DSH_HOME || join(homedir(), ".dsh");
 }
 
+//#region src/usage-ledger.ts
+/**
+ * 每日 × 模型的 token 台账（2026-10-31）。
+ *
+ * ## 为什么在池子里记
+ *
+ * 宿主在流里发 `{ type:"usage", usage:{ inputTokens, outputTokens, cacheReadTokens?, cacheWriteTokens? } }`，
+ * 而**所有走池子的对话都经过这里**，且这一刻它明确知道是哪个渠道的哪个模型。
+ * 别处都拿不到这份数据：
+ *   - 会话存储只有每个会话的**累计**，没有模型维度，也不按天切；
+ *   - channel-pack 的 token-ledger 只覆盖它自己的渠道；
+ *   - 上游额度接口给的是"还剩多少"，不是 token 明细。
+ *
+ * ## 记账口径
+ *
+ * - `attempts` 每次发起 +1；`requests` 只在**产出正文或工具调用**后 +1，`errors` 反之。
+ *   一次对话换 3 个候选才有 1 个成功，那记作 3 attempts / 1 request / 2 errors。
+ * - token **只在宿主报出来时累加**：失败流通常没有 usage，就不该凭空记消耗。
+ * - 缓存读单列（`cacheReadTokens`）—— 本项目实测缓存读能到输入的 10 倍量级，
+ *   混进 input 会让"我用了多少"彻底失真。
+ * - 按**本地时区**切天。用 UTC 的话，晚上 8 点后的用量会算到"明天"。
+ *
+ * ## 存储
+ *
+ * `~/.dsh/model-pool/usage/YYYY-MM-DD.json`，一天一个文件，原子写（tmp + rename），
+ * 保留 180 天。写失败一律吞掉：记账不该有机会打扰对话。
+ */
+const USAGE_SCHEMA = "model-pool/usage/v1";
+const USAGE_RETENTION_DAYS = 180;
+const USAGE_FLUSH_MS = 1500;
+const usageCache = /* @__PURE__ */ new Map();
+const usageDirty = /* @__PURE__ */ new Set();
+let usageFlushTimer = null;
+let usagePrunedOn = "";
+
+function usageDir() {
+  return join(dshHome(), "model-pool", "usage");
+}
+
+/** 本地时区的 `YYYY-MM-DD`。 */
+function usageDayKey(date = /* @__PURE__ */ new Date()) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+function usageFile(day) {
+  return join(usageDir(), `${day}.json`);
+}
+
+function emptyUsageEntry() {
+  return { requests: 0, attempts: 0, errors: 0, uncachedInputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0, firstAt: "", lastAt: "" };
+}
+
+function readUsageDay(day) {
+  const cached = usageCache.get(day);
+  if (cached !== void 0) return cached;
+  let doc = { schema: USAGE_SCHEMA, day, entries: {} };
+  try {
+    const raw = JSON.parse(readFileSync(usageFile(day), "utf8"));
+    if (raw && raw.schema === USAGE_SCHEMA && raw.entries && typeof raw.entries === "object") doc = raw;
+  } catch {
+    /* 文件不存在或坏了：从空的开始。只有记账时才写，不会把旧文件覆盖成空 */
+  }
+  usageCache.set(day, doc);
+  return doc;
+}
+
+function writeUsageDay(day, doc) {
+  try {
+    mkdirSync(usageDir(), { recursive: true });
+    const target = usageFile(day);
+    const tmp = `${target}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify(doc, null, 1), "utf8");
+    renameSync(tmp, target);
+  } catch {
+    /* 记账失败不打扰对话 */
+  }
+}
+
+function flushUsage() {
+  if (usageFlushTimer !== null) {
+    clearTimeout(usageFlushTimer);
+    usageFlushTimer = null;
+  }
+  for (const day of usageDirty) {
+    const doc = usageCache.get(day);
+    if (doc !== void 0) writeUsageDay(day, doc);
+  }
+  usageDirty.clear();
+}
+
+function scheduleUsageFlush() {
+  if (usageFlushTimer !== null) return;
+  usageFlushTimer = setTimeout(() => {
+    usageFlushTimer = null;
+    flushUsage();
+  }, USAGE_FLUSH_MS);
+  if (typeof usageFlushTimer.unref === "function") usageFlushTimer.unref();
+}
+
+/** 只删自己写的 `YYYY-MM-DD.json`，别的一概不碰。 */
+function pruneUsage(todayKey) {
+  if (usagePrunedOn === todayKey) return;
+  usagePrunedOn = todayKey;
+  let names;
+  try {
+    names = readdirSync(usageDir());
+  } catch {
+    return;
+  }
+  const cutoff = /* @__PURE__ */ new Date();
+  cutoff.setDate(cutoff.getDate() - USAGE_RETENTION_DAYS);
+  const cutoffKey = usageDayKey(cutoff);
+  for (const name of names) {
+    if (!/^[0-9]{4}-[0-9]{2}-[0-9]{2}\.json$/.test(name)) continue;
+    if (name.slice(0, 10) >= cutoffKey) continue;
+    try {
+      unlinkSync(join(usageDir(), name));
+    } catch {
+      /* 删不掉就算了，下次再试 */
+    }
+  }
+}
+
+/**
+ * 记一次候选尝试。返回被更新的条目，方便探针断言。
+ *
+ * @param input.entry - 形如 `qoder/DeepSeek-Flash` 的候选键（台账主键）。
+ * @param input.usage - 宿主报的 usage；没报就是 undefined。
+ * @param input.ok - 这一次是否产出了正文或工具调用。
+ */
+function recordPoolUsage({ entry, provider, model, scheme, usage, ok }) {
+  const now = /* @__PURE__ */ new Date();
+  const day = usageDayKey(now);
+  pruneUsage(day);
+  const doc = readUsageDay(day);
+  const row = doc.entries[entry] ?? (doc.entries[entry] = emptyUsageEntry());
+  row.attempts += 1;
+  if (ok) row.requests += 1;
+  else row.errors += 1;
+  if (typeof provider === "string" && provider !== "") row.provider = provider;
+  if (typeof model === "string" && model !== "") row.model = model;
+  // scheme 只记"最近一次命中的方案"，不按方案分组：用户只用一个方案时它没有展示价值，
+  // 但留在数据里，将来真要分组时历史数据已经带着它。
+  if (typeof scheme === "string" && scheme !== "") row.scheme = scheme;
+  const amount = (value) => typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+  if (usage !== void 0 && usage !== null) {
+    row.uncachedInputTokens += amount(usage.inputTokens);
+    row.outputTokens += amount(usage.outputTokens);
+    row.cacheReadTokens += amount(usage.cacheReadTokens);
+    row.cacheWriteTokens += amount(usage.cacheWriteTokens);
+  }
+  const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+  if (row.firstAt === "") row.firstAt = hhmm;
+  row.lastAt = hhmm;
+  usageDirty.add(day);
+  scheduleUsageFlush();
+  return row;
+}
+
+/** 取最近 `days` 天（含今天）的台账，新到旧。 */
+function usageReport(days = 7) {
+  const span = Math.max(1, Math.min(90, Number(days) || 7));
+  const out = [];
+  for (let index = 0; index < span; index += 1) {
+    const date = /* @__PURE__ */ new Date();
+    date.setDate(date.getDate() - index);
+    const day = usageDayKey(date);
+    out.push({ day, entries: readUsageDay(day).entries });
+  }
+  return out;
+}
+//#endregion
+
 // 渠道中心（dsh-workbuddy-trae-qoder-connect）内置默认名，与该插件 DEFAULT_REGISTRY_CHANNELS 对齐；
 // 用户在面板改的名写在 $DSH_HOME/connect-channels.json，读取后覆盖这些默认值。
 const DEFAULT_CHANNEL_NAMES = {
@@ -639,9 +815,14 @@ class PoolAdapter {
       ch.type === "tool-call-delta" ||
       (ch.type === "block-end" && (ch.block?.type === "tool-call" || ch.block?.type === "tool-result"));
     let seen = false;
+    // 本次尝试宿主报出的 usage。pi-ai 适配器把它作为独立 chunk 发出来：
+    // { type:"usage", usage:{ inputTokens, outputTokens, cacheReadTokens?, cacheWriteTokens? } }
+    let reported = void 0;
+    try {
     let cur = await it.next();
     while (!cur.done) {
       const chunk = cur.value;
+      if (chunk.type === "usage") reported = chunk.usage;
       if (isErrFinish(chunk)) {
         const fail = chunk.reason?.failure;
         __poolDiag(`[stream] ${c.entry} 错误块 code=${fail?.code || ""} seen=${seen} msg=${String(fail?.message || "").slice(0, 160)}`);
@@ -674,6 +855,25 @@ class PoolAdapter {
       cur = await it.next();
     }
     if (!seen) throw new Error(`${c.entry} 返回空流（无可见正文）`);
+    } catch (error) {
+      throw error;
+    } finally {
+      /**
+       * 记账：无论成败都记一次尝试。
+       *
+       * `ok` 取"有没有产出正文或工具调用"——空流、首报错、被上游掐断都算失误，
+       * 这跟冷却判定的口径一致（`seen`）。token 只在宿主真报了 usage 时才累加：
+       * 失败流通常没有 usage，凭空补一个 0 或估算值都是在编数据。
+       */
+      recordPoolUsage({
+        entry: c.entry,
+        provider: c.provider,
+        model: c.model,
+        scheme: schemeName,
+        usage: reported,
+        ok: seen
+      });
+    }
   }
   // 刷新宿主当前已注册 adapter 的 provider 集合；路由（可 await）处调用，供发起前过滤与面板标注
   async refreshRegistered() {
@@ -1175,6 +1375,23 @@ function apply(ctx) {
   });
 
   // GET /api/model-pool/current —— 最近一次实际命中的供应商/模型 + 尝试与冷却
+  // GET /api/model-pool/usage?days=7 —— 每日 x 模型 的 token 台账（只读）
+  reg({
+    kind: "exact",
+    path: "/api/model-pool/usage",
+    handler: async (req, res) => {
+      try {
+        const url = new URL(req.url || "/", "http://127.0.0.1");
+        const days = Number(url.searchParams.get("days") || 7);
+        const report = usageReport(days);
+        const today = report[0] || { day: usageDayKey(), entries: {} };
+        sendJson(res, 200, { ok: true, today: today.day, entries: today.entries, days: report });
+      } catch (e) {
+        sendJson(res, 500, { ok: false, error: e.message });
+      }
+    }
+  });
+
   reg({
     kind: "exact",
     path: "/api/model-pool/current",
@@ -1275,6 +1492,8 @@ function apply(ctx) {
 }
 
 export { apply, inject, name, TRIGGER_CODES };
+// 只给探针：台账的合并/切天/保留期不该只靠看界面来验。
+export { recordPoolUsage as __recordPoolUsage, usageReport as __usageReport, flushUsage as __flushUsage, usageDayKey as __usageDayKey };
 // 仅给探针用：_attemptStream 的"有产出"判定需要真构造 Adapter 才能测，
 // 而 PoolAdapter 本身不进公共 API（DSH 只经 apply 拿到它）。
 export { PoolAdapter as __PoolAdapter };
