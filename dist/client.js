@@ -1175,13 +1175,22 @@
         React.createElement("span", { style: styles.dragHandle }, "⠿"),
         React.createElement("span", { style: { color: "#999", width: 22 } }, i + 1),
         React.createElement("span", null, friendlyChain(c)),
-        (() => {
-          const r = results[c];
-          if (!r) return null;
-          const col = r.status === "ok" ? "#12b76a" : r.status === "skip" ? "#98a2b3" : "#f04438";
-          const label = r.status === "ok" ? `${r.latency}ms` : r.status === "skip" ? "跳过" : "失败";
-          return React.createElement("span", { style: { marginLeft: 8, fontSize: 12, color: col }, title: r.error || "" }, `● ${label}`);
-        })(),
+        testing[c] === true
+          ? React.createElement("span", { style: { marginLeft: 8, fontSize: 12, color: "#4f46e5" } }, "测中…")
+          : (() => {
+              const r = results[c];
+              if (!r) return null;
+              const col = r.status === "ok" ? "#12b76a" : r.status === "skip" ? "#98a2b3" : "#f04438";
+              const label = r.status === "ok" ? `${r.latency}ms` : r.status === "skip" ? "跳过" : "失败";
+              return React.createElement("span", { style: { marginLeft: 8, fontSize: 12, color: col }, title: r.error || "" }, `● ${label}`);
+            })(),
+        // 链路内测单个条目：qoder-intl 这类"整轮自检里没有结果"的，可以单独打一发看真实报错
+        React.createElement("button", {
+          style: { ...styles.btn, height: 20, padding: "0 8px", fontSize: 11 },
+          disabled: testing[c] === true,
+          title: "只测这一条（向该供应商/模型发一个最小请求）",
+          onClick: () => void testOne(c)
+        }, testing[c] === true ? "…" : "测"),
         React.createElement("button", { style: styles.removeBtn, onClick: () => removeChainItem(i) }, "移除")
       ))
     );
