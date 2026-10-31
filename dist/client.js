@@ -361,6 +361,10 @@
         if (!hay.includes(q)) return false;
       }
       if (filter === "ok" && results[m.key]?.status !== "ok") return false;
+      // 免费列显示的是「是 / — / ?」三态，筛选必须用同一套判据，否则筛选结果和列里看到的不一致
+      if (filter === "free" && m.free !== true) return false;
+      if (filter === "paid" && !(m.free !== true && m.configured)) return false;
+      if (filter === "unknown" && (m.free === true || m.configured)) return false;
       if (filter === "provider" && m.provider !== filterVal) return false;
       if (filter === "family" && familyOf(m.modelId) !== filterVal) return false;
       return true;
@@ -772,10 +776,14 @@
         React.createElement("select", { style: styles.select, value: filter, onChange: (e) => setFilter(e.target.value) },
           React.createElement("option", { value: "all" }, "全部"),
           React.createElement("option", { value: "ok" }, "仅可用"),
+          React.createElement("option", { value: "free" }, "仅免费"),
+          React.createElement("option", { value: "paid" }, "仅非免费"),
+          React.createElement("option", { value: "unknown" }, "免费未知"),
           React.createElement("option", { value: "provider" }, "按供应商"),
           React.createElement("option", { value: "family" }, "按模型族")
         ),
-        filter !== "all" && React.createElement("select", { style: styles.select, value: filterVal, onChange: (e) => setFilterVal(e.target.value) },
+        // 只有「按供应商 / 按模型族」才需要第二个下拉；免费三态是自足的，别给它多挂一个空控件
+        (filter === "provider" || filter === "family") && React.createElement("select", { style: styles.select, value: filterVal, onChange: (e) => setFilterVal(e.target.value) },
           (filter === "provider" ? providers : families).map((v) => React.createElement("option", { key: v, value: v }, v))
         ),
         React.createElement("button", { style: styles.btn, onClick: toggleAll }, allCollapsed ? "全部展开" : "全部折叠"),
@@ -785,7 +793,7 @@
         )
       ),
       React.createElement("div", { style: { fontSize: 12, color: "#888", margin: "4px 0 10px", display: "flex", alignItems: "center", gap: 10 } },
-        React.createElement("span", null, q ? `匹配 ${filtered.length} / 共 ${models.length} 个模型` : `共 ${models.length} 个模型`),
+        React.createElement("span", null, q || filter !== "all" ? `匹配 ${filtered.length} / 共 ${models.length} 个模型` : `共 ${models.length} 个模型`),
         notice && React.createElement("span", { style: { ...styles.notice, ...(notice.type === "ok" ? styles.noticeOk : styles.noticeErr) } }, notice.text),
         lastTestAt && React.createElement("span", { style: { fontSize: 12, color: "#999" }, title: new Date(lastTestAt).toLocaleString() },
           `上次测试 ${new Date(lastTestAt).toLocaleTimeString()}`)
