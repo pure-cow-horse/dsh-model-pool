@@ -4,6 +4,7 @@
 import { existsSync, readFileSync, writeFileSync, appendFileSync, renameSync, unlinkSync, readdirSync, statSync, mkdirSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
 import { homedir } from "node:os";
+import { zstdDecompressSync } from "node:zlib";
 import { load as loadYAML, DEFAULT_SCHEMA, Schema as YamlSchema, Type as YamlType } from "js-yaml";
 
 // 顶层加载诊断（区分导入失败 / apply 抛错）
@@ -277,6 +278,260 @@ function readSettingsCached(profile) {
     for (const [k, v] of Object.entries(cached.cfg)) merged[k] = v;
   }
   return merged;
+}
+//#endregion
+
+
+//#region src/session-replay.ts
+/**
+ * 会话日志回放：补上「不经模型池」的那部分用量（2026-10-31）。
+ *
+ * ## 为什么还需要这一层
+ *
+ * 池子台账只覆盖走 `ModelPool` 的请求。用户在模型列表里**直接选某个具体模型**时，
+ * 宿主绕过池子直发，池子看不见 —— 这部分占少数，但会让"每天每个模型"少一块。
+ *
+ * 会话日志里有完整事件流：`request/header`（`data.header.config.provider/model`）、
+ * `request/context`、`assistant/message`（`data.usage` + turn/step）。所以旁路读它，
+ * 就能把直连那部分补回来 —— **不进请求路径，出错最多数字不准**。
+ *
+ * ## 三条口径（写错就会和池子台账打架）
+ *
+ * 1. **跳过 `provider === "ModelPool"`**：那些请求池子台账已经记了真实候选模型，
+ *    这里再记一遍就是把同一笔用量算两次。实测会话里它写作 `ModelPool/纯deepseek`
+ *    （模型位放的是**方案名**，不是模型名）。
+ * 2. **按 `sessionId:turn:step` 去重**：`assistant/attempt`（中途快照）与
+ *    `assistant/message`（最终）可能都带 usage，后到的覆盖先到的。
+ * 3. **本地时区切天**：与池子台账保持一致。
+ *
+ * ## 性能
+ *
+ * `~/.dsh/sessions` 实测 170MB / 389 个文件。所以按文件缓存 `mtime-size` 修订号，
+ * 没变就不解压；只解析落在查询范围内的文件。解压走 Node 自带的
+ * `zstdDecompressSync`，并按 `0xFD2FB528` magic 切**多帧**（一个文件是多帧拼接）。
+ */
+const SESSION_ZSTD_MAGIC = 0xFD2FB528;
+const REPLAY_CACHE_TTL_MS = 30000;
+const replayFiles = /* @__PURE__ */ new Map();
+let replayScannedAt = 0;
+
+function sessionsRoot() {
+  return join(dshHome(), "sessions");
+}
+
+/** 逐行折出「一次已完成调用」的记录。纯函数，探针直接喂文本。 */
+function foldSessionText(text, sessionKey) {
+  const records = [];
+  /** `${turn}:${step}` → 记录下标；后到的（message）覆盖先到的（attempt）。 */
+  const byStep = /* @__PURE__ */ new Map();
+  let provider = "";
+  let model = "";
+  const lines = text.split("\n");
+  for (const line of lines) {
+    if (line === "" || line.charCodeAt(0) !== 123) continue; // 只处理以 `{` 开头的行
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (event === null || typeof event !== "object") continue;
+    switch (event.type) {
+      case "request/header": {
+        const config = event.data?.header?.config;
+        if (config !== undefined && config !== null) {
+          if (typeof config.provider === "string") provider = config.provider;
+          if (typeof config.model === "string") model = config.model;
+        }
+        break;
+      }
+      case "request/context": {
+        const data = event.data;
+        if (data !== undefined && data !== null) {
+          if (typeof data.provider === "string") provider = data.provider;
+          if (typeof data.model === "string") model = data.model;
+        }
+        break;
+      }
+      case "assistant/attempt":
+      case "assistant/message": {
+        const data = event.data;
+        if (data === undefined || data === null) break;
+        const usage = data.usage ?? lastUsageOfAttempt(data.stream);
+        if (usage === undefined || usage === null) break;
+        // 池子那层的用量由池子台账负责，这里跳过（见文件头口径 1）
+        if (provider === "ModelPool") break;
+        const record = {
+          time: typeof event.time === "number" ? event.time : Date.now(),
+          provider: provider === "" ? "unknown" : provider,
+          model: model === "" ? "unknown" : model,
+          session: sessionKey,
+          turn: data.turn ?? 0,
+          step: data.step ?? 0,
+          usage
+        };
+        const key = `${record.turn}:${record.step}`;
+        const existing = byStep.get(key);
+        if (existing === undefined) {
+          byStep.set(key, records.length);
+          records.push(record);
+        } else {
+          records[existing] = record; // 最终值覆盖中途快照，但不会累加
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  return records;
+}
+
+/** `assistant/attempt.data.stream` 里最后一个 usage 块。 */
+function lastUsageOfAttempt(stream) {
+  if (!Array.isArray(stream)) return void 0;
+  let last;
+  for (const item of stream) {
+    const chunk = item?.chunk;
+    if (chunk?.type === "usage" && chunk.usage !== undefined) last = chunk.usage;
+  }
+  return last;
+}
+
+/** 多帧 zstd：按 magic 切帧后逐帧解压。 */
+function decompressSessionBuffer(buffer) {
+  const starts = [];
+  for (let index = 0; index + 3 < buffer.length; index += 1) {
+    if (buffer.readUInt32LE(index) === SESSION_ZSTD_MAGIC) starts.push(index);
+  }
+  if (starts.length === 0) return buffer.toString("utf8");
+  starts.push(buffer.length);
+  let text = "";
+  for (let index = 0; index < starts.length - 1; index += 1) {
+    try {
+      text += zstdDecompressSync(buffer.subarray(starts[index], starts[index + 1])).toString("utf8");
+    } catch {
+      /* 单帧坏了就跳过这一帧，不让整份会话消失 */
+    }
+  }
+  return text;
+}
+
+/** 枚举所有会话日志文件（只 stat，不读内容）。 */
+function listSessionFiles() {
+  const root = sessionsRoot();
+  const out = [];
+  let projects;
+  try {
+    projects = readdirSync(root);
+  } catch {
+    return out;
+  }
+  for (const project of projects) {
+    const projectDir = join(root, project);
+    let sessions;
+    try {
+      if (!statSync(projectDir).isDirectory()) continue;
+      sessions = readdirSync(projectDir);
+    } catch {
+      continue;
+    }
+    for (const session of sessions) {
+      const sessionDir = join(projectDir, session);
+      let files;
+      try {
+        if (!statSync(sessionDir).isDirectory()) continue;
+        files = readdirSync(sessionDir);
+      } catch {
+        continue;
+      }
+      for (const name of files) {
+        if (!name.startsWith("session")) continue;
+        if (!name.endsWith(".jsonl") && !name.endsWith(".jsonl.zstd") && !name.endsWith(".zstd")) continue;
+        const file = join(sessionDir, name);
+        try {
+          const stat = statSync(file);
+          out.push({ file, sessionKey: session, mtimeMs: stat.mtimeMs, size: stat.size });
+        } catch {
+          /* 权限/被删：跳过 */
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * 回放近 `days` 天的直连用量。
+ *
+ * @returns `{ rows, stats }`，`rows` 是 `{ day, provider, model, requests, usage }`，
+ *   `stats` 记录扫了多少文件、跳过多少、耗时，供页面上的对账区显示。
+ */
+function replayDirectUsage(days) {
+  const now = Date.now();
+  if (now - replayScannedAt < REPLAY_CACHE_TTL_MS) {
+    const cached = replayCached(days);
+    if (cached !== void 0) return cached;
+  }
+  const started = Date.now();
+  const span = Math.max(1, Math.min(180, Number(days) || 7));
+  const cutoffDay = (() => {
+    const date = /* @__PURE__ */ new Date();
+    date.setDate(date.getDate() - span + 1);
+    date.setHours(0, 0, 0, 0);
+    return date.getTime();
+  })();
+  const aggregate = /* @__PURE__ */ new Map();
+  const stats = { files: 0, parsed: 0, skipped: 0, failed: 0, records: 0 };
+  for (const entry of listSessionFiles()) {
+    stats.files += 1;
+    if (entry.mtimeMs < cutoffDay) {
+      stats.skipped += 1;
+      continue;
+    }
+    const revision = `${Math.floor(entry.mtimeMs)}-${entry.size}`;
+    const cached = replayFiles.get(entry.file);
+    let records;
+    if (cached !== void 0 && cached.revision === revision) {
+      records = cached.records;
+    } else {
+      try {
+        const text = decompressSessionBuffer(readFileSync(entry.file));
+        records = foldSessionText(text, entry.sessionKey);
+        replayFiles.set(entry.file, { revision, records });
+        stats.parsed += 1;
+      } catch {
+        stats.failed += 1;
+        continue;
+      }
+    }
+    for (const record of records) {
+      if (record.time < cutoffDay) continue;
+      stats.records += 1;
+      const day = usageDayKey(new Date(record.time));
+      const key = `${day}|${record.provider}|${record.model}`;
+      const row = aggregate.get(key) ?? { day, provider: record.provider, model: record.model, requests: 0, uncachedInputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0 };
+      row.requests += 1;
+      row.uncachedInputTokens += amountOf(record.usage.inputTokens);
+      row.outputTokens += amountOf(record.usage.outputTokens);
+      row.cacheReadTokens += amountOf(record.usage.cacheReadTokens);
+      row.cacheWriteTokens += amountOf(record.usage.cacheWriteTokens);
+      aggregate.set(key, row);
+    }
+  }
+  const result = { rows: [...aggregate.values()], stats: { ...stats, days: span, tookMs: Date.now() - started } };
+  replayScannedAt = Date.now();
+  replayCache.set(span, result);
+  return result;
+}
+
+const replayCache = /* @__PURE__ */ new Map();
+function replayCached(days) {
+  return replayCache.get(Math.max(1, Math.min(180, Number(days) || 7)));
+}
+
+function amountOf(value) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
 }
 //#endregion
 
@@ -1383,9 +1638,59 @@ function apply(ctx) {
       try {
         const url = new URL(req.url || "/", "http://127.0.0.1");
         const days = Number(url.searchParams.get("days") || 7);
-        const report = usageReport(days);
-        const today = report[0] || { day: usageDayKey(), entries: {} };
-        sendJson(res, 200, { ok: true, today: today.day, entries: today.entries, days: report });
+        // 池子台账（真实候选模型）+ 会话回放（直连部分）合并
+        const poolDays = usageReport(days);
+        const direct = replayDirectUsage(days);
+        const rows = [];
+        for (const day of poolDays) {
+          for (const [key, entry] of Object.entries(day.entries || {})) {
+            const slash = String(key).indexOf("/");
+            rows.push({
+              day: day.day,
+              source: "pool",
+              provider: entry.provider ?? (slash > 0 ? String(key).slice(0, slash) : String(key)),
+              model: entry.model ?? (slash > 0 ? String(key).slice(slash + 1) : String(key)),
+              requests: entry.requests ?? 0,
+              errors: entry.errors ?? 0,
+              uncachedInputTokens: entry.uncachedInputTokens ?? 0,
+              cacheReadTokens: entry.cacheReadTokens ?? 0,
+              cacheWriteTokens: entry.cacheWriteTokens ?? 0,
+              outputTokens: entry.outputTokens ?? 0
+            });
+          }
+        }
+        for (const row of direct.rows) {
+          rows.push({ ...row, source: "direct", errors: void 0 });
+        }
+        // 汇总：按天 + 总体。对账只比 token（请求数口径两边不同：池子含失败尝试）
+        const byDay = /* @__PURE__ */ new Map();
+        const overall = { requests: 0, errors: 0, uncachedInputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0 };
+        const poolTokens = { uncachedInputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0 };
+        const directTokens = { uncachedInputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0 };
+        for (const row of rows) {
+          const bucket = byDay.get(row.day) ?? { day: row.day, requests: 0, errors: 0, uncachedInputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0 };
+          for (const field of ["requests", "errors", "uncachedInputTokens", "cacheReadTokens", "cacheWriteTokens", "outputTokens"]) {
+            const value = row[field] ?? 0;
+            bucket[field] += value;
+            overall[field] += value;
+          }
+          const side = row.source === "pool" ? poolTokens : directTokens;
+          for (const field of ["uncachedInputTokens", "cacheReadTokens", "cacheWriteTokens", "outputTokens"]) side[field] += row[field] ?? 0;
+          byDay.set(row.day, bucket);
+        }
+        const tokenSum = (bag) => bag.uncachedInputTokens + bag.cacheReadTokens + bag.cacheWriteTokens + bag.outputTokens;
+        sendJson(res, 200, {
+          ok: true,
+          today: usageDayKey(),
+          days,
+          rows,
+          totals: { overall, byDay: [...byDay.values()].sort((a, b) => (a.day < b.day ? 1 : -1)) },
+          reconcile: {
+            poolTokens: tokenSum(poolTokens),
+            directTokens: tokenSum(directTokens),
+            replay: direct.stats
+          }
+        });
       } catch (e) {
         sendJson(res, 500, { ok: false, error: e.message });
       }
@@ -1401,6 +1706,23 @@ function apply(ctx) {
       } catch (e) { sendJson(res, 500, { ok: false, error: e.message }); }
     }
   });
+
+  /**
+   * 预热会话回放：首次进「用量统计」要解压几十个会话文件（实测 7 天约 5.6s）。
+   * 在这里后台先跑一次，用户点开页签时就已经是缓存命中。
+   * `unref` 掉定时器，别让它把进程钉住。
+   */
+  const warmReplay = () => {
+    try {
+      replayDirectUsage(7);
+    } catch {
+      /* 预热失败无所谓，打开页签时还会再试 */
+    }
+  };
+  const warmTimer = setTimeout(warmReplay, 4000);
+  if (typeof warmTimer.unref === "function") warmTimer.unref();
+  const warmInterval = setInterval(warmReplay, 10 * 60000);
+  if (typeof warmInterval.unref === "function") warmInterval.unref();
 
   // POST /api/model-pool/test {key} —— 单模型最小请求测试
   reg({
@@ -1494,6 +1816,7 @@ function apply(ctx) {
 export { apply, inject, name, TRIGGER_CODES };
 // 只给探针：台账的合并/切天/保留期不该只靠看界面来验。
 export { recordPoolUsage as __recordPoolUsage, usageReport as __usageReport, flushUsage as __flushUsage, usageDayKey as __usageDayKey };
+export { foldSessionText as __foldSessionText, decompressSessionBuffer as __decompressSessionBuffer, replayDirectUsage as __replayDirectUsage };
 // 仅给探针用：_attemptStream 的"有产出"判定需要真构造 Adapter 才能测，
 // 而 PoolAdapter 本身不进公共 API（DSH 只经 apply 拿到它）。
 export { PoolAdapter as __PoolAdapter };
