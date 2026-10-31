@@ -649,7 +649,15 @@ async function fetchUpstreamModels(baseURL, apiKey) {
 //#endregion
 
 //#region 最小请求测试
+// 直连探测：目标 baseURL 明确、10 秒足够。
 const PROBE_TIMEOUT_MS = 10000;
+/**
+ * 运行时探测（经宿主 llm.stream）：走的是"运行时注册的渠道"——Qoder 国际版要过
+ * 海外链路再回环 shim，实测光建连就要 6 秒以上，10 秒会把**可用**的渠道判成超时
+ * （表现为 Qoder 国际版一直"不可用"，而插件侧其实 signed-in、模型齐全）。
+ * 所以运行时探测单独放宽到 30 秒。
+ */
+const RUNTIME_PROBE_TIMEOUT_MS = 30000;
 
 async function readSnippet(resp, max) {
   try {
@@ -699,7 +707,7 @@ async function probeViaRuntime(llm, provider, model) {
     return { status: "skip", latency: 0, error: "宿主 llm 运行时不可用" };
   }
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), RUNTIME_PROBE_TIMEOUT_MS);
   const start = Date.now();
   try {
     const stream = llm.stream({
@@ -733,7 +741,7 @@ async function probeViaRuntime(llm, provider, model) {
     return {
       status: "fail",
       latency: Date.now() - start,
-      error: e?.name === "AbortError" ? `超时（${PROBE_TIMEOUT_MS / 1e3}s）` : e?.message || String(e)
+      error: e?.name === "AbortError" ? `超时（${RUNTIME_PROBE_TIMEOUT_MS / 1e3}s）` : e?.message || String(e)
     };
   } finally { clearTimeout(timer); }
 }
