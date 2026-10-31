@@ -600,7 +600,7 @@
                 React.createElement("div", { style: { fontSize: 12, color: "#666" } },
                   `输入 ${fmtNum(overall.uncachedInputTokens)} · 缓存读 ${fmtNum(overall.cacheReadTokens)} · 输出 ${fmtNum(overall.outputTokens)}`),
                 React.createElement("div", { style: { fontSize: 11, color: "#999", marginTop: 2 } },
-                  `来源：池子 ${fmtNum(poolCount)} 行 / 直连 ${fmtNum(directCount)} 行 · 范围 ${usage.days} 天`)
+                  `来源：池子 ${fmtNum(poolCount)} 行 / 直连 ${fmtNum(directCount)} 行` + (typeof usage.days === "number" ? ` · 范围 ${usage.days} 天` : ""))
               ),
               // ② 按模型
               React.createElement("div", { style: { fontWeight: 600, marginBottom: 6 } }, "按模型"),
