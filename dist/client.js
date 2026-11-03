@@ -1207,6 +1207,7 @@
     const [use, setUse] = useState(null);
     const [byKey, setByKey] = useState({});
     const [scheme, setScheme] = useState(null);
+    const [caps, setCaps] = useState(null);
     const useSigRef = useRef("-");
     const chainSigRef = useRef("");
     useEffect(() => {
@@ -1267,35 +1268,73 @@
         clearInterval(tModels);
       };
     }, []);
+    // 档位能力：60 秒拉一次（后端另有 5 分钟缓存）。页面隐藏时跳过。
+    useEffect(() => {
+      let alive = true;
+      const load = async () => {
+        if (document.hidden) return;
+        try {
+          const j = await fetch("/api/model-pool/efforts", { cache: "no-store" }).then((r) => r.json()).catch(() => null);
+          if (alive && j && j.ok) setCaps(j);
+        } catch { /* 忽略：拿不到就退回"档位未知" */ }
+      };
+      load();
+      const t = setInterval(load, 60000);
+      return () => { alive = false; clearInterval(t); };
+    }, []);
+
     const name = props?.model?.name || "";
     const isPool = props?.provider?.id === "ModelPool" || props?.model?.provider === "ModelPool";
     if (!isPool) return React.createElement("span", null, name);
 
-    // 档位控件（2026-11-03 第二版）。
-    // 为什么不在输入框里放可点的胶囊：宿主那个模型按钮宽度固定且会裁剪，
-    // 带边框的胶囊塞进去只剩半圈边框（实测）。所以拆成两处：
-    //   trigger —— 只显示当前档位的纯文本后缀，不占空间、不抢点击；
-    //   menu    —— 点开模型名后的下拉里放横排五档，空间充足、一点即中。
-    const EFFORT_CHOICES = [["", "自动"], ["minimal", "最低"], ["low", "低"], ["medium", "中"], ["high", "高"]];
+    // 档位控件（2026-11-03 第三版：跟着供应商实际能力走）。
+    // 宿主里档位是 per-model 能力，供应商不同档位就不同（有的只给 off/high/max，
+    // 有的给 low/medium/high）。所以**只渲染当前供应商支持的档位**，选不到非法值；
+    // 用户选过就写进 providerEfforts[供应商]，运行时每个候选用自己那份。
     const stopAll = (e) => { e.stopPropagation(); };
-    const current = scheme?.effort || "";
-    const effortShort = (v) => (v === "minimal" ? "最低" : v === "low" ? "低" : v === "medium" ? "中" : v === "high" ? "高" : "自动");
+    const entriesMap = caps?.entries || {};
+    const providerEfforts = caps?.providerEfforts || {};
+    const hitKey = use ? `${use.provider}/${use.model}` : "";
+
+    // 当前供应商：优先用实际命中的，否则退到第一个有能力的候选
+    const currentProvider = (use && use.provider) || (() => {
+      const keys = Object.keys(entriesMap);
+      if (keys.length === 0) return "";
+      return keys[0].slice(0, keys[0].indexOf("/"));
+    })();
+
+    // 该供应商的能力（同一供应商下取第一个有条目的模型；同名模型档位一致）
+    const capFor = (provider) => {
+      if (!provider) return null;
+      if (hitKey && entriesMap[hitKey]) return entriesMap[hitKey];
+      const key = Object.keys(entriesMap).find((k) => k.startsWith(`${provider}/`));
+      return key ? entriesMap[key] : null;
+    };
+
+    const cap = capFor(currentProvider);
+    const supported = Array.isArray(cap?.supported) ? cap.supported : null;
+    const names = cap?.names || {};
+    const levelName = (id) => (id === "" ? "自动" : names[id] || { off: "Off", minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "XHigh", max: "Max" }[id] || id);
+
+    // 记忆值：该供应商上次选的；没选过则跟随方案默认（scheme.effort）
+    const remembered = providerEfforts[currentProvider];
+    const current = typeof remembered === "string" ? remembered : (scheme?.effort || "");
 
     const saveEffort = async (v) => {
-      setScheme((cur) => ({ ...(cur || { name: "" }), effort: v }));
       try {
         const cur = await fetch("/api/model-pool/chain").then((r) => r.json());
-        if (cur.ok) {
-          const schemes = { ...(cur.state?.schemes || {}) };
-          const sn = cur.state?.activeScheme;
-          schemes[sn] = { ...(schemes[sn] || {}), effort: v };
-          await fetch("/api/model-pool/chain", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ schemes, activeScheme: sn })
-          });
-        }
-      } catch { /* 本地已乐观更新，下一轮 /chain 轮询会纠正 */ }
+        if (!cur.ok) return;
+        const nextProviderEfforts = { ...(cur.state?.providerEfforts || {}) };
+        if (!currentProvider) return;
+        if (v === "") delete nextProviderEfforts[currentProvider];
+        else nextProviderEfforts[currentProvider] = v;
+        setCaps((c) => ({ ...(c || {}), providerEfforts: nextProviderEfforts }));
+        await fetch("/api/model-pool/chain", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ providerEfforts: nextProviderEfforts })
+        });
+      } catch { /* 下一轮轮询会纠正 */ }
     };
 
     const label = use
@@ -1307,29 +1346,34 @@
         })()
       : name;
 
-    // 下拉里的横排五档：空间充足，直接点
-    const effortBar = React.createElement("span", {
-      onMouseDown: stopAll,
-      onClick: stopAll,
-      style: { display: "inline-flex", alignItems: "center", gap: 3, marginLeft: "auto", paddingLeft: 10, flexShrink: 0 }
-    },
-      React.createElement("span", { style: { fontSize: 11, color: "#8b949e", marginRight: 2 } }, "档位"),
-      EFFORT_CHOICES.map(([v, text]) =>
-        React.createElement("button", {
-          key: v || "auto",
-          type: "button",
-          title: v === "" ? "跟随宿主，不注入推理强度" : `推理强度 ${text}（本方案全链统一）`,
-          onClick: (e) => { stopAll(e); saveEffort(v); },
-          style: {
-            fontSize: 11, lineHeight: "16px", padding: "0 7px", borderRadius: 999,
-            border: `1px solid ${current === v ? "#0b64d4" : "#d0d7de"}`,
-            background: current === v ? "#eef4ff" : "transparent",
-            color: current === v ? "#0b64d4" : "#57606a",
-            cursor: "pointer", whiteSpace: "nowrap"
-          }
-        }, text)
-      )
-    );
+    // 下拉里的横排档位：只有供应商支持的档位（外加"自动"= 不注入）
+    const options = ["", ...(supported || [])];
+    const effortBar = supported === null
+      ? React.createElement("span", {
+          style: { marginLeft: "auto", paddingLeft: 10, fontSize: 11, color: "#8b949e", flexShrink: 0 },
+          title: cap?.error ? `取不到能力：${cap.error}` : "该模型未声明推理档位"
+        }, "档位未知")
+      : React.createElement("span", {
+          onMouseDown: stopAll,
+          onClick: stopAll,
+          style: { display: "inline-flex", alignItems: "center", gap: 3, marginLeft: "auto", paddingLeft: 10, flexShrink: 0 }
+        },
+          options.map((v) =>
+            React.createElement("button", {
+              key: v || "auto",
+              type: "button",
+              title: v === "" ? "不注入推理强度，由渠道自己决定" : `推理强度 ${levelName(v)}（按供应商记忆）`,
+              onClick: (e) => { stopAll(e); saveEffort(v); },
+              style: {
+                fontSize: 11, lineHeight: "16px", padding: "0 7px", borderRadius: 999,
+                border: `1px solid ${current === v ? "#0b64d4" : "#d0d7de"}`,
+                background: current === v ? "#eef4ff" : "transparent",
+                color: current === v ? "#0b64d4" : "#57606a",
+                cursor: "pointer", whiteSpace: "nowrap"
+              }
+            }, levelName(v))
+          )
+        );
 
     // 展开菜单(menu)：模型名 + 档位横排
     if (props?.placement !== "trigger" || !props?.selected) {
@@ -1340,13 +1384,13 @@
       }, name), effortBar);
     }
 
-    // 闭合按钮(trigger)：命中标签 + 档位纯文本（不可点，避免与宿主模型菜单抢点击）
+    // 闭合按钮(trigger)：命中标签 + 当前档位纯文本
     return React.createElement("span", { style: { display: "inline-flex", alignItems: "center", minWidth: 0 } },
       label,
       React.createElement("span", {
-        title: `推理等级：${effortShort(current)}（点开模型名可调，作用于当前方案）`,
+        title: `推理等级：${levelName(current)}（点开模型名可调；按供应商记忆）`,
         style: { marginLeft: 6, color: "#8b949e", whiteSpace: "nowrap", flexShrink: 0 }
-      }, `· ${effortShort(current)}`)
+      }, `· ${levelName(current)}`)
     );
   }
 

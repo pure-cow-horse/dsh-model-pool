@@ -990,6 +990,14 @@ class PoolAdapter {
       return { provider, model: rest.join("/"), entry };
     }).filter((c) => (this.cooldown.get(c.entry) || 0) <= now);
     __poolDiag(`[stream] 候选=${candidates.length} 冷却剔除=${chain.length - candidates.length} 顺序=${candidates.map((x) => x.entry).join(" | ")}`);
+    // 按供应商记忆档位（方案 A）：每个候选用它自己供应商上次选的档位，
+    // 没选过才回落到方案默认值。这样降级到另一家时，不会塞它不认的档位
+    // （宿主会报 UNSUPPORTED_REASONING_EFFORT，白白多一次往返）。
+    const providerEfforts = this.readState()?.providerEfforts || {};
+    const effortFor = (provider) => {
+      const remembered = providerEfforts[provider];
+      return typeof remembered === "string" ? remembered : effort;
+    };
     let lastError;
     for (const c of candidates) {
       const attempt = { entry: c.entry, provider: c.provider, model: c.model, at: now, ok: false, error: null, skipped: false };
@@ -1006,12 +1014,13 @@ class PoolAdapter {
       // 已知不支持的档位先记下来（entry → {effort, until}，10 分钟过期）：方案固定
       // effort=medium 而渠道目录只有 high/max/low 时，**每一回合**都要先吃一次本地
       // 拒绝再回落（2026-10-24 实测 270 次/天），记住后直接走默认档，省掉那次空跑。
+      const cEffort = effortFor(c.provider);
       const blockedEffort = this.effortUnsupported.get(c.entry);
-      const effortBlocked = effort !== "" && blockedEffort !== void 0 && blockedEffort.effort === effort && now < blockedEffort.until;
-      let variants = effort ? [effort, ""] : [""];
+      const effortBlocked = cEffort !== "" && blockedEffort !== void 0 && blockedEffort.effort === cEffort && now < blockedEffort.until;
+      let variants = cEffort ? [cEffort, ""] : [""];
       if (effortBlocked) {
         variants = [""];
-        __poolDiag(`[stream] ${c.entry} 跳过已知不支持的 effort=${effort}（${Math.ceil((blockedEffort.until - now) / 1000)}s 后重试），直接用渠道默认`);
+        __poolDiag(`[stream] ${c.entry} 跳过已知不支持的 effort=${cEffort}（${Math.ceil((blockedEffort.until - now) / 1000)}s 后重试），直接用渠道默认`);
       }
       let variantErr = null;
       let usedVariant = null;
@@ -1026,14 +1035,14 @@ class PoolAdapter {
           }
           usedVariant = v;
           // 这条 (渠道, 档位) 组合这次被接受了：清掉旧记忆，目录更新后立即恢复尝试
-          if (v === effort && effort !== "") this.effortUnsupported.delete(c.entry);
+          if (v === cEffort && cEffort !== "") this.effortUnsupported.delete(c.entry);
           break; // 成功
         } catch (e) {
           variantErr = e;
           const msg = e?.message || String(e);
           const unsupported = /UNSUPPORTED_REASONING_EFFORT|does not support reasoning effort/i.test(msg);
           // 不支持当前强度且还有"去掉强度"这一备选：换变体重试，不冷却
-          if (unsupported && v === effort && effort) {
+          if (unsupported && v === cEffort && cEffort) {
             this.effortUnsupported.set(c.entry, { effort, until: now + this.EFFORT_UNSUPPORTED_TTL_MS });
             __poolDiag(`[stream] ${c.entry} 不支持 effort=${effort}，回落该渠道默认模式重试（${Math.round(this.EFFORT_UNSUPPORTED_TTL_MS / 1000)}s 内不再尝试该档位）`);
             continue;
@@ -1608,6 +1617,10 @@ function apply(ctx) {
     }
   });
 
+  // 档位能力缓存：provider/model -> { at, value: { supported, names, defaultEffort, error } }
+  const EFFORT_CAP_TTL_MS = 5 * 60 * 1000;
+  const effortCapCache = new Map();
+
   // GET /api/model-pool/models —— 拉上游全目录并合并已配置模型
   reg({
     kind: "exact",
@@ -1827,6 +1840,60 @@ function apply(ctx) {
     }
   });
 
+  // GET /api/model-pool/efforts —— 每个候选模型实际支持的思考档位
+  //
+  // 档位是 per-model 能力（provider 配置的 reasoningEfforts；pi-ai 的
+  // THINKING_LEVELS 共 off/minimal/low/medium/high/xhigh/max 七档），
+  // 不同供应商给的并不一样。写死五档就会塞给模型它不认的值。
+  reg({
+    kind: "exact",
+    path: "/api/model-pool/efforts",
+    handler: async (_req, res) => {
+      try {
+        const live = ctx.get("llm") || llm;
+        const state = readState(profile);
+        const schemeName = state.activeScheme;
+        const chain = Array.isArray(state.schemes?.[schemeName]?.chain) ? state.schemes[schemeName].chain : [];
+        const now = Date.now();
+        const entries = {};
+        const jobs = [];
+        for (const raw of chain.slice(0, 60)) {
+          const key = typeof raw === "string" ? raw : (raw && raw.entry) || "";
+          const slash = key.indexOf("/");
+          if (slash <= 0) continue;
+          const provider = key.slice(0, slash);
+          const model = key.slice(slash + 1);
+          jobs.push((async () => {
+            const hit = effortCapCache.get(key);
+            if (hit && now - hit.at < EFFORT_CAP_TTL_MS) { entries[key] = hit.value; return; }
+            let value = { supported: null, names: {}, defaultEffort: null, error: null };
+            try {
+              if (!live || typeof live.resolveModelInfo !== "function") throw new Error("宿主未提供 resolveModelInfo");
+              const info = await live.resolveModelInfo(provider, model);
+              const reasoning = info && info.reasoning;
+              if (reasoning && Array.isArray(reasoning.efforts) && reasoning.efforts.length) {
+                value = {
+                  supported: reasoning.efforts.map((e) => e.id),
+                  names: Object.fromEntries(reasoning.efforts.map((e) => [e.id, e.name || e.id])),
+                  defaultEffort: reasoning.defaultEffort || null,
+                  error: null
+                };
+              }
+            } catch (e) {
+              value = { supported: null, names: {}, defaultEffort: null, error: e?.message || String(e) };
+            }
+            effortCapCache.set(key, { at: now, value });
+            entries[key] = value;
+          })());
+        }
+        await Promise.all(jobs);
+        sendJson(res, 200, { ok: true, scheme: schemeName, providerEfforts: state.providerEfforts || {}, entries });
+      } catch (e) {
+        sendJson(res, 500, { ok: false, error: e?.message || String(e) });
+      }
+    }
+  });
+
   // /api/model-pool/chain —— GET 读方案与激活链；POST 保存方案 / 切换激活（同路径按方法分发）
   reg({
     kind: "exact",
@@ -1841,6 +1908,10 @@ function apply(ctx) {
         if (body.schemes) state.schemes = body.schemes;
         if (body.contextWindow !== undefined) state.contextWindow = body.contextWindow; // 全局上下文窗口覆盖
         if (body.cooldownMs !== undefined) state.cooldownMs = body.cooldownMs; // 失败渠道冷却时长（毫秒）
+        // 按供应商记忆档位：整体替换（前端传全量映射），不做深合并，避免删不掉旧键
+        if (body.providerEfforts !== undefined && body.providerEfforts !== null && typeof body.providerEfforts === "object") {
+          state.providerEfforts = body.providerEfforts;
+        }
         writeState(profile, state);
         return sendJson(res, 200, { ok: true, state });
       }
