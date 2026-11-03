@@ -1209,10 +1209,6 @@
     const [scheme, setScheme] = useState(null);
     const useSigRef = useRef("-");
     const chainSigRef = useRef("");
-    const [panelOpen, setPanelOpen] = useState(false);
-    const [listOpen, setListOpen] = useState(false);
-    const [panelPos, setPanelPos] = useState(null);
-    const chipRef = useRef(null);
     useEffect(() => {
       let alive = true;
       // 2026-10-26 P0：原来每 3 秒把 /current + /models（330 行/80KB）+ /chain 一起拉一遍，
@@ -1271,64 +1267,22 @@
         clearInterval(tModels);
       };
     }, []);
-    // 弹层关闭：点外部 / Esc / 窗口尺寸变化。放在早退之前，保证 hooks 顺序恒定。
-    useEffect(() => {
-      if (!panelOpen) return;
-      const onDown = (ev) => {
-        const el = ev.target;
-        if (chipRef.current && chipRef.current.contains(el)) return;
-        if (el && el.closest && el.closest("[data-pool-panel]")) return;
-        setPanelOpen(false); setListOpen(false);
-      };
-      const onKey = (ev) => { if (ev.key === "Escape") { setPanelOpen(false); setListOpen(false); } };
-      const onResize = () => setPanelOpen(false);
-      document.addEventListener("mousedown", onDown, true);
-      document.addEventListener("keydown", onKey, true);
-      window.addEventListener("resize", onResize);
-      return () => {
-        document.removeEventListener("mousedown", onDown, true);
-        document.removeEventListener("keydown", onKey, true);
-        window.removeEventListener("resize", onResize);
-      };
-    }, [panelOpen]);
-
     const name = props?.model?.name || "";
     const isPool = props?.provider?.id === "ModelPool" || props?.model?.provider === "ModelPool";
     if (!isPool) return React.createElement("span", null, name);
 
-    // 展开菜单(menu/option)：保持方案项原样，不放切换器
-    if (props?.placement !== "trigger" || !props?.selected) return React.createElement("span", null, name);
-
-    // 档位胶囊 + 两行弹层（2026-11-03）。
-    // 原生 select 塞在输入框里太挤，选项只能塞下"关/低/中/高"，还解释不了
-    // "档位作用于整个方案"。这里拆成：胶囊显示当前档位 → 弹层两行：模型（只读）
-    // + 推理等级（可切）。热区与宿主的模型菜单分开：标签和 ⌄ 仍归宿主，胶囊是
-    // 独立按钮并吞掉事件，避免点一下同时打开两个面板。
-    const EFFORT_CHOICES = [["", "自动（跟随宿主）"], ["minimal", "最低"], ["low", "低"], ["medium", "中"], ["high", "高"]];
-    const effortShort = (v) => (v === "minimal" ? "最低" : v === "low" ? "低" : v === "medium" ? "中" : v === "high" ? "高" : "自动");
+    // 档位控件（2026-11-03 第二版）。
+    // 为什么不在输入框里放可点的胶囊：宿主那个模型按钮宽度固定且会裁剪，
+    // 带边框的胶囊塞进去只剩半圈边框（实测）。所以拆成两处：
+    //   trigger —— 只显示当前档位的纯文本后缀，不占空间、不抢点击；
+    //   menu    —— 点开模型名后的下拉里放横排五档，空间充足、一点即中。
+    const EFFORT_CHOICES = [["", "自动"], ["minimal", "最低"], ["low", "低"], ["medium", "中"], ["high", "高"]];
     const stopAll = (e) => { e.stopPropagation(); };
-
-    const openPanel = (e) => {
-      stopAll(e);
-      if (panelOpen) { setPanelOpen(false); setListOpen(false); return; }
-      const r = chipRef.current && chipRef.current.getBoundingClientRect ? chipRef.current.getBoundingClientRect() : null;
-      const W = 252;
-      const vw = window.innerWidth || 1200;
-      const vh = window.innerHeight || 800;
-      const left = r ? Math.max(8, Math.min(r.left - 8, vw - W - 8)) : 8;
-      const above = r ? r.top > 300 : false;
-      setPanelPos({
-        left,
-        width: W,
-        ...(above ? { bottom: vh - (r ? r.top : 0) + 8 } : { top: (r ? r.bottom : 0) + 8 })
-      });
-      setPanelOpen(true);
-    };
+    const current = scheme?.effort || "";
+    const effortShort = (v) => (v === "minimal" ? "最低" : v === "low" ? "低" : v === "medium" ? "中" : v === "high" ? "高" : "自动");
 
     const saveEffort = async (v) => {
       setScheme((cur) => ({ ...(cur || { name: "" }), effort: v }));
-      setListOpen(false);
-      setPanelOpen(false);
       try {
         const cur = await fetch("/api/model-pool/chain").then((r) => r.json());
         if (cur.ok) {
@@ -1353,74 +1307,47 @@
         })()
       : name;
 
-    const chip = React.createElement("button", {
-      ref: chipRef,
-      type: "button",
-      title: "推理等级（作用于当前方案，降级换供应商时保持一致）",
+    // 下拉里的横排五档：空间充足，直接点
+    const effortBar = React.createElement("span", {
       onMouseDown: stopAll,
-      onClick: openPanel,
-      onKeyDown: (e) => { stopAll(e); if (e.key === "Enter" || e.key === " ") openPanel(e); },
-      style: {
-        fontSize: 12, marginLeft: 6, padding: "1px 8px", border: "1px solid #d0d7de",
-        borderRadius: 999, background: "transparent", color: "#57606a", cursor: "pointer",
-        lineHeight: "18px", display: "inline-flex", alignItems: "center", gap: 4
-      }
-    }, effortShort(scheme?.effort || ""), React.createElement("span", { style: { color: "#8b949e" } }, "›"));
-
-    const rowStyle = { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 };
-    const current = scheme?.effort || "";
-
-    const panel = panelOpen
-      ? React.createElement("div", {
-          "data-pool-panel": "1",
-          onMouseDown: stopAll,
-          onClick: stopAll,
+      onClick: stopAll,
+      style: { display: "inline-flex", alignItems: "center", gap: 3, marginLeft: "auto", paddingLeft: 10, flexShrink: 0 }
+    },
+      React.createElement("span", { style: { fontSize: 11, color: "#8b949e", marginRight: 2 } }, "档位"),
+      EFFORT_CHOICES.map(([v, text]) =>
+        React.createElement("button", {
+          key: v || "auto",
+          type: "button",
+          title: v === "" ? "跟随宿主，不注入推理强度" : `推理强度 ${text}（本方案全链统一）`,
+          onClick: (e) => { stopAll(e); saveEffort(v); },
           style: {
-            position: "fixed", ...panelPos, zIndex: 2147483000, background: "#fff",
-            border: "1px solid #d0d7de", borderRadius: 10, boxShadow: "0 8px 24px rgba(0,0,0,.12)",
-            padding: "10px 12px", fontSize: 12, color: "#24292f", cursor: "default", textAlign: "left"
+            fontSize: 11, lineHeight: "16px", padding: "0 7px", borderRadius: 999,
+            border: `1px solid ${current === v ? "#0b64d4" : "#d0d7de"}`,
+            background: current === v ? "#eef4ff" : "transparent",
+            color: current === v ? "#0b64d4" : "#57606a",
+            cursor: "pointer", whiteSpace: "nowrap"
           }
-        },
-          React.createElement("div", { style: { ...rowStyle, paddingBottom: 8, borderBottom: "1px solid #eaeef2" } },
-            React.createElement("span", null, "模型"),
-            React.createElement("span", {
-              style: { color: "#57606a", textAlign: "right", maxWidth: 168, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
-              title: label
-            }, label)
-          ),
-          React.createElement("div", { style: { ...rowStyle, paddingTop: 8 } },
-            React.createElement("span", null, "推理等级"),
-            React.createElement("button", {
-              type: "button",
-              onClick: (e) => { stopAll(e); setListOpen(!listOpen); },
-              style: { fontSize: 12, background: "transparent", border: "1px solid #d0d7de", borderRadius: 6, padding: "1px 8px", color: "#24292f", cursor: "pointer" }
-            }, effortShort(current), " ", React.createElement("span", { style: { color: "#8b949e" } }, listOpen ? "‹" : "›"))
-          ),
-          listOpen
-            ? React.createElement("div", { style: { marginTop: 6, borderTop: "1px solid #eaeef2", paddingTop: 4 } },
-                EFFORT_CHOICES.map(([v, text]) =>
-                  React.createElement("button", {
-                    key: v || "auto",
-                    type: "button",
-                    onClick: (e) => { stopAll(e); saveEffort(v); },
-                    style: {
-                      display: "flex", width: "100%", alignItems: "center", justifyContent: "space-between",
-                      gap: 8, padding: "5px 8px", margin: "1px 0", border: "none", borderRadius: 6,
-                      background: current === v ? "#eef4ff" : "transparent",
-                      color: current === v ? "#0b64d4" : "#24292f",
-                      cursor: "pointer", fontSize: 12, textAlign: "left"
-                    }
-                  }, React.createElement("span", null, text), React.createElement("span", { style: { width: 10, color: "#0b64d4" } }, current === v ? "✓" : ""))
-                )
-              )
-            : null,
-          React.createElement("div", { style: { marginTop: 8, paddingTop: 6, borderTop: "1px solid #eaeef2", color: "#8b949e", fontSize: 11, lineHeight: 1.5 } },
-            `作用于方案「${scheme?.name || "—"}」· 全链统一；渠道不支持时自动回落默认档`
-          )
-        )
-      : null;
+        }, text)
+      )
+    );
 
-    return React.createElement("span", { style: { display: "inline-flex", alignItems: "center" } }, label, chip, panel);
+    // 展开菜单(menu)：模型名 + 档位横排
+    if (props?.placement !== "trigger" || !props?.selected) {
+      return React.createElement("span", {
+        style: { display: "inline-flex", alignItems: "center", width: "100%", minWidth: 0 }
+      }, React.createElement("span", {
+        style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }
+      }, name), effortBar);
+    }
+
+    // 闭合按钮(trigger)：命中标签 + 档位纯文本（不可点，避免与宿主模型菜单抢点击）
+    return React.createElement("span", { style: { display: "inline-flex", alignItems: "center", minWidth: 0 } },
+      label,
+      React.createElement("span", {
+        title: `推理等级：${effortShort(current)}（点开模型名可调，作用于当前方案）`,
+        style: { marginLeft: 6, color: "#8b949e", whiteSpace: "nowrap", flexShrink: 0 }
+      }, `· ${effortShort(current)}`)
+    );
   }
 
   const inject = ["slots", "locale"];
