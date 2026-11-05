@@ -1743,10 +1743,10 @@
               React.createElement("thead", null,
                 React.createElement("tr", null,
                   React.createElement("th", { style: { ...styles.th, width: 44, textAlign: "center" } }, "序"),
-                  React.createElement("th", { style: { ...styles.th, width: 90 } }, "梯队角色"),
+                  React.createElement("th", { style: { ...styles.th, width: 130 } }, "服务商"),
                   React.createElement("th", { style: styles.th }, "目标模型 (Model)"),
-                  React.createElement("th", { style: { ...styles.th, width: 120 } }, "服务商"),
-                  React.createElement("th", { style: { ...styles.th, width: 110 } }, "健康度 / 延迟"),
+                  React.createElement("th", { style: { ...styles.th, width: 140 } }, "能力特性"),
+                  React.createElement("th", { style: { ...styles.th, width: 120 } }, "健康度 / 延迟"),
                   React.createElement("th", { style: { ...styles.th, width: 116, textAlign: "right" } }, "操作")
                 )
               ),
@@ -1759,15 +1759,6 @@
                   const modelName = row ? (row.modelName || row.modelId) : modelId;
                   const provName = friendlyProvider(provider);
 
-                  // 梯队标识
-                  const tierBadge = i === 0
-                    ? { text: "🥇 主力", bg: "rgba(245, 158, 11, 0.12)", color: "#b45309", border: "rgba(245, 158, 11, 0.3)" }
-                    : i === 1
-                    ? { text: "🥈 备用", bg: "rgba(100, 116, 139, 0.12)", color: "#475569", border: "rgba(100, 116, 139, 0.3)" }
-                    : i === 2
-                    ? { text: "🥉 替补", bg: "rgba(180, 83, 9, 0.1)", color: "#9a3412", border: "rgba(180, 83, 9, 0.25)" }
-                    : { text: "🛡️ 兜底", bg: "var(--dsw-alias-bg-layer-2, rgba(0,0,0,0.04))", color: "var(--dsw-alias-label-tertiary, #666)", border: "var(--dsw-alias-border-l2, rgba(0,0,0,0.08))" };
-
                   // 特性标签检测
                   const hasVision = /vision|vl|-v\b|4o|gemini|claude|omni|pixtral|minicpm-v|internvl|qwen.*max|qwen.*plus|glm-4v|glm-5/i.test(modelId) && !/coder|code/i.test(modelId);
                   const isReasoning = /reasoner|r1|o1|o3|thinking|thought/i.test(modelId);
@@ -1776,6 +1767,7 @@
                   // 冷却与测试状态（钉住探测用例 r = results[c]）
                   const coolingItem = coolingMap[c];
                   const r = results[c];
+                  const isCurrentlyServing = current?.lastUse && (current.lastUse.entry === c || (current.lastUse.provider === provider && current.lastUse.model === modelId));
 
                   return React.createElement("tr", {
                     key: c + "_" + i,
@@ -1786,54 +1778,91 @@
                     style: {
                       cursor: "grab",
                       borderBottom: "1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.06))",
+                      background: isCurrentlyServing ? "rgba(26, 127, 55, 0.04)" : "transparent",
                       transition: "background 0.12s"
                     }
                   },
-                    // 序号与手柄
+                    // 1. 序号与手柄
                     React.createElement("td", { style: { ...styles.td, textAlign: "center", color: "var(--dsw-alias-label-tertiary, #999)", userSelect: "none" } },
                       React.createElement("span", { style: styles.dragHandle, title: "按住拖拽排序" }, "⠿"),
                       React.createElement("span", { style: { fontSize: 11, fontFamily: "monospace" } }, String(i + 1).padStart(2, "0"))
                     ),
 
-                    // 梯队角色
-                    React.createElement("td", { style: styles.td },
-                      React.createElement("span", {
-                        style: {
-                          padding: "2px 6px",
-                          borderRadius: 4,
-                          fontSize: 11,
-                          fontWeight: 600,
-                          background: tierBadge.bg,
-                          color: tierBadge.color,
-                          border: "1px solid " + tierBadge.border
-                        }
-                      }, tierBadge.text)
+                    // 2. 服务商 (移至第 2 列)
+                    React.createElement("td", { style: { ...styles.td, fontWeight: 500, color: "var(--dsw-alias-label-primary, #111)" } },
+                      provName
                     ),
 
-                    // 目标模型
+                    // 3. 目标模型 (Model)
                     React.createElement("td", { style: styles.td },
-                      React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } },
-                        React.createElement("span", { style: { fontWeight: 600, fontSize: 12 }, title: modelId }, modelName),
+                      React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6 } },
+                        React.createElement("b", { style: { fontSize: 12 }, title: modelId }, modelName),
+                        isCurrentlyServing && React.createElement("span", {
+                          style: {
+                            fontSize: 10,
+                            padding: "1px 5px",
+                            borderRadius: 3,
+                            background: "rgba(26, 127, 55, 0.12)",
+                            color: "var(--dsw-alias-state-success-primary, #1a7f37)",
+                            fontWeight: 600
+                          }
+                        }, "🟢 活跃中")
+                      ),
+                      modelName !== modelId && React.createElement("div", { style: { fontSize: 10, color: "var(--dsw-alias-label-tertiary, #888)", fontFamily: "monospace", marginTop: 2 } }, modelId)
+                    ),
+
+                    // 4. 能力特性 (独立新列：[ 🖼️ 多模态 ]、[ 🧠 思考 ]、[ 🆓 免费 ])
+                    React.createElement("td", { style: styles.td },
+                      React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" } },
                         hasVision && React.createElement("span", {
-                          style: { padding: "1px 5px", borderRadius: 3, fontSize: 10, background: "rgba(14, 165, 233, 0.12)", color: "#0284c7" },
+                          style: {
+                            padding: "2px 6px",
+                            borderRadius: 4,
+                            fontSize: 11,
+                            background: "rgba(14, 165, 233, 0.12)",
+                            border: "1px solid rgba(14, 165, 233, 0.25)",
+                            color: "#0284c7",
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: 2
+                          },
                           title: "多模态视觉模型（图片输入自动智能引导）"
-                        }, "🖼️ VL"),
+                        }, "🖼️ 多模态"),
                         isReasoning && React.createElement("span", {
-                          style: { padding: "1px 5px", borderRadius: 3, fontSize: 10, background: "rgba(99, 102, 241, 0.12)", color: "#4f46e5" },
+                          style: {
+                            padding: "2px 6px",
+                            borderRadius: 4,
+                            fontSize: 11,
+                            background: "rgba(99, 102, 241, 0.12)",
+                            border: "1px solid rgba(99, 102, 241, 0.25)",
+                            color: "var(--dsw-alias-button-primary-fill, #4f46e5)",
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: 2
+                          },
                           title: "深度思考/推理模型"
                         }, "🧠 思考"),
                         isFree && React.createElement("span", {
-                          style: { padding: "1px 5px", borderRadius: 3, fontSize: 10, background: "rgba(16, 185, 129, 0.12)", color: "#059669" },
+                          style: {
+                            padding: "2px 6px",
+                            borderRadius: 4,
+                            fontSize: 11,
+                            background: "rgba(16, 185, 129, 0.12)",
+                            border: "1px solid rgba(16, 185, 129, 0.25)",
+                            color: "var(--dsw-alias-state-success-primary, #059669)",
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: 2
+                          },
                           title: "免费公共额度"
-                        }, "🆓 免费")
-                      ),
-                      modelName !== modelId && React.createElement("div", { style: { fontSize: 10, color: "var(--dsw-alias-label-tertiary, #888)", fontFamily: "monospace" } }, modelId)
+                        }, "🆓 免费"),
+                        !hasVision && !isReasoning && !isFree && React.createElement("span", {
+                          style: { color: "var(--dsw-alias-label-tertiary, #999)", fontSize: 11 }
+                        }, "纯文本")
+                      )
                     ),
 
-                    // 服务商
-                    React.createElement("td", { style: { ...styles.td, color: "var(--dsw-alias-label-secondary, #555)" } }, provName),
-
-                    // 健康度 / 延迟
+                    // 5. 健康度 / 延迟
                     React.createElement("td", { style: styles.td },
                       testing[c] === true
                         ? React.createElement("span", { style: { marginLeft: 8, fontSize: 12, color: "#4f46e5" } }, "测中…")
@@ -1851,7 +1880,7 @@
                           })()
                     ),
 
-                    // 操作按钮组
+                    // 6. 操作按钮组
                     React.createElement("td", { style: { ...styles.td, textAlign: "right" } },
                       React.createElement("div", { style: { display: "inline-flex", gap: 3, alignItems: "center" } },
                         React.createElement("button", {
