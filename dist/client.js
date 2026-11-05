@@ -74,34 +74,171 @@
   }
 
   const styles = {
-    wrap: { padding: 16, fontSize: 13, color: "var(--dsw-alias-label-primary,#333)" },
-    toolbar: { display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 12 },
-    btn: { height: 28, padding: "0 14px", fontSize: 12, cursor: "pointer", borderRadius: 14, border: "1px solid var(--dsw-alias-border-l2,#ddd)", background: "transparent", color: "inherit" },
-    btnPrimary: { background: "var(--dsw-alias-button-primary-fill,#4f46e5)", color: "#fff", border: "none" },
-    select: { height: 28, padding: "0 8px", fontSize: 12, borderRadius: 8, border: "1px solid var(--dsw-alias-border-l2,#ddd)" },
-    search: { height: 28, width: 180, padding: "0 10px", fontSize: 12, borderRadius: 14, border: "1px solid var(--dsw-alias-border-l2,#ddd)", background: "transparent", color: "inherit" },
+    wrap: {
+      padding: 16,
+      fontSize: 13,
+      color: "var(--dsw-alias-label-primary, #1f2328)",
+      background: "var(--dsw-alias-bg-layer-0, transparent)"
+    },
+    toolbar: {
+      display: "flex",
+      gap: 8,
+      flexWrap: "wrap",
+      alignItems: "center",
+      marginBottom: 12
+    },
+    btn: {
+      height: 28,
+      padding: "0 12px",
+      fontSize: 12,
+      cursor: "pointer",
+      borderRadius: 6,
+      border: "1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.12))",
+      background: "var(--dsw-alias-bg-layer-1, #ffffff)",
+      color: "var(--dsw-alias-label-primary, #1f2328)",
+      display: "inline-flex",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 4,
+      userSelect: "none",
+      transition: "background 0.15s, border-color 0.15s"
+    },
+    btnPrimary: {
+      background: "var(--dsw-alias-button-primary-fill, #4f46e5)",
+      color: "#ffffff",
+      border: "1px solid transparent",
+      fontWeight: 500
+    },
+    select: {
+      height: 28,
+      padding: "0 8px",
+      fontSize: 12,
+      borderRadius: 6,
+      border: "1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.12))",
+      background: "var(--dsw-alias-bg-layer-1, #ffffff)",
+      color: "var(--dsw-alias-label-primary, #1f2328)"
+    },
+    search: {
+      height: 28,
+      width: 180,
+      padding: "0 10px",
+      fontSize: 12,
+      borderRadius: 6,
+      border: "1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.12))",
+      background: "var(--dsw-alias-bg-layer-1, #ffffff)",
+      color: "var(--dsw-alias-label-primary, #1f2328)"
+    },
     notice: { fontSize: 12, marginLeft: 8 },
-    noticeOk: { color: "#1a7f37" },
-    noticeErr: { color: "#c0392b" },
-    table: { width: "100%", borderCollapse: "collapse", fontSize: 12 },
-    // 表头吸顶：模型列表与用量表都在 overflow 容器里，往下拉会看不见列名（2026-10-31）。
-    // borderCollapse: collapse 的表格里，sticky 元素的 borderBottom 在滚动时会被吃掉，
-    // 所以再叠一层 inset boxShadow 画那条线。
-    th: { textAlign: "left", padding: "6px 8px", borderBottom: "1px solid #eee", fontWeight: 600, position: "sticky", top: 0, zIndex: 3, background: "#fff", boxShadow: "inset 0 -1px 0 #eee" },
-    td: { padding: "6px 8px", borderBottom: "1px solid #f3f3f3" },
-    badge: { padding: "2px 8px", borderRadius: 10, fontSize: 11 },
-    ok: { background: "#e6f7ea", color: "#1a7f37" },
-    fail: { background: "#fdecea", color: "#c0392b" },
-    skip: { background: "#eee", color: "#666" },
-    idle: { background: "#f0f0f0", color: "#888" },
-    schemeBox: { marginTop: 16, padding: 12, border: "1px solid #eee", borderRadius: 10 },
+    noticeOk: { color: "var(--dsw-alias-state-success-primary, #1a7f37)" },
+    noticeErr: { color: "var(--dsw-alias-state-error-primary, #cf222e)" },
+    table: {
+      width: "100%",
+      borderCollapse: "collapse",
+      fontSize: 12,
+      color: "var(--dsw-alias-label-primary, #1f2328)"
+    },
+    th: {
+      textAlign: "left",
+      padding: "8px 10px",
+      borderBottom: "1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.08))",
+      fontWeight: 600,
+      position: "sticky",
+      top: 0,
+      zIndex: 3,
+      background: "#fff",
+      color: "var(--dsw-alias-label-secondary, #656d76)",
+      boxShadow: "inset 0 -1px 0 #eee"
+    },
+    td: {
+      padding: "7px 10px",
+      borderBottom: "1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.06))",
+      color: "var(--dsw-alias-label-primary, #1f2328)"
+    },
+    badge: {
+      padding: "2px 7px",
+      borderRadius: 4,
+      fontSize: 11,
+      display: "inline-flex",
+      alignItems: "center",
+      gap: 3,
+      fontWeight: 500
+    },
+    ok: {
+      background: "rgba(26, 127, 55, 0.12)",
+      color: "var(--dsw-alias-state-success-primary, #1a7f37)",
+      border: "1px solid rgba(26, 127, 55, 0.25)"
+    },
+    fail: {
+      background: "rgba(207, 34, 46, 0.12)",
+      color: "var(--dsw-alias-state-error-primary, #cf222e)",
+      border: "1px solid rgba(207, 34, 46, 0.25)"
+    },
+    skip: {
+      background: "rgba(100, 116, 139, 0.12)",
+      color: "var(--dsw-alias-label-secondary, #64748b)",
+      border: "1px solid rgba(100, 116, 139, 0.2)"
+    },
+    idle: {
+      background: "var(--dsw-alias-bg-layer-2, rgba(0,0,0,0.04))",
+      color: "var(--dsw-alias-label-tertiary, #8c959f)",
+      border: "1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.08))"
+    },
+    schemeBox: {
+      marginTop: 14,
+      padding: 14,
+      border: "1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.08))",
+      borderRadius: 8,
+      background: "var(--dsw-alias-bg-layer-0, transparent)"
+    },
     chainRow: { display: "flex", alignItems: "center", gap: 8, padding: "4px 0" },
-    tabs: { display: "flex", gap: 4, borderBottom: "1px solid #eee", marginBottom: 14 },
-    tabBtn: { padding: "8px 16px", cursor: "pointer", fontSize: 13, border: "none", background: "transparent", color: "#888", borderBottom: "2px solid transparent" },
-    tabBtnActive: { color: "var(--dsw-alias-button-primary-fill,#4f46e5)", borderBottom: "2px solid var(--dsw-alias-button-primary-fill,#4f46e5)", fontWeight: 600 },
-    chainItem: { display: "flex", alignItems: "center", gap: 8, padding: "6px 8px", margin: "4px 0", border: "1px solid #eee", borderRadius: 8, background: "#fafafa", cursor: "grab" },
-    dragHandle: { color: "#bbb", cursor: "grab", userSelect: "none", padding: "0 4px" },
-    removeBtn: { marginLeft: "auto", border: "none", background: "transparent", color: "#c0392b", cursor: "pointer", fontSize: 12, padding: "0 6px" }
+    tabs: {
+      display: "flex",
+      gap: 6,
+      borderBottom: "1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.08))",
+      marginBottom: 14
+    },
+    tabBtn: {
+      padding: "8px 16px",
+      cursor: "pointer",
+      fontSize: 13,
+      border: "none",
+      background: "transparent",
+      color: "var(--dsw-alias-label-secondary, #656d76)",
+      borderBottom: "2px solid transparent",
+      fontWeight: 500,
+      transition: "color 0.15s, border-color 0.15s"
+    },
+    tabBtnActive: {
+      color: "var(--dsw-alias-button-primary-fill, #4f46e5)",
+      borderBottom: "2px solid var(--dsw-alias-button-primary-fill, #4f46e5)",
+      fontWeight: 600
+    },
+    chainItem: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      padding: "6px 10px",
+      margin: "4px 0",
+      border: "1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.08))",
+      borderRadius: 6,
+      background: "var(--dsw-alias-bg-layer-1, #ffffff)",
+      cursor: "grab"
+    },
+    dragHandle: {
+      color: "var(--dsw-alias-label-tertiary, #8c959f)",
+      cursor: "grab",
+      userSelect: "none",
+      padding: "0 4px"
+    },
+    removeBtn: {
+      marginLeft: "auto",
+      border: "none",
+      background: "transparent",
+      color: "var(--dsw-alias-state-error-primary, #cf222e)",
+      cursor: "pointer",
+      fontSize: 12,
+      padding: "0 6px"
+    }
   };
 
   async function api(path, opts) {
@@ -513,7 +650,7 @@
       return React.createElement(React.Fragment, null,
         // 透明遮罩：点面板外关闭
         React.createElement("div", { style: { position: "fixed", inset: 0, zIndex: 40 }, onClick: () => setOpenFilter(null) }),
-        React.createElement("div", { style: { position: "fixed", left, top, width: 238, zIndex: 41, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, boxShadow: "0 10px 28px rgba(0,0,0,.12)", fontSize: 12, overflow: "hidden" } },
+        React.createElement("div", { style: { position: "fixed", left, top, width: 238, zIndex: 41, background: "var(--dsw-alias-bg-layer-1, #fff)", border: "1px solid var(--dsw-alias-border-l1, #e5e7eb)", borderRadius: 8, boxShadow: "0 10px 28px rgba(0,0,0,.18)", fontSize: 12, overflow: "hidden" } },
           React.createElement("div", { style: { padding: "8px 12px", color: "#6b7280", fontSize: 11, borderBottom: "1px solid #f3f4f6", display: "flex", justifyContent: "space-between" } },
             React.createElement("span", null, COLUMN_LABEL[col]),
             React.createElement("span", { style: { cursor: "pointer", color: "#9ca3af" }, onClick: () => setOpenFilter(null) }, "关闭")),
@@ -660,6 +797,14 @@
     };
     const removeChainItem = (i) => {
       const next = activeChain.filter((_, j) => j !== i);
+      persistChain(next);
+    };
+    const moveChainItem = (i, delta) => {
+      const target = i + delta;
+      if (target < 0 || target >= activeChain.length) return;
+      const next = [...activeChain];
+      const [item] = next.splice(i, 1);
+      next.splice(target, 0, item);
       persistChain(next);
     };
 
@@ -979,7 +1124,7 @@
           const headRow = React.createElement("tr", {
             key: "g:" + provider,
             onClick: () => setCollapsed((p) => ({ ...p, [provider]: p[provider] === false ? true : false })),
-            style: { cursor: "pointer", background: "#f7f7f9", fontWeight: 600, userSelect: "none" }
+            style: { cursor: "pointer", background: "var(--dsw-alias-bg-layer-2, #f7f7f9)", fontWeight: 600, userSelect: "none" }
           }, React.createElement("td", { colSpan: 7 },
             (isCol ? "▶ " : "▼ ") + rows[0].displayName + `（${rows.length} 个模型` + (selCount ? `，已选 ${selCount}` : "") + "）",
             React.createElement("button", {
@@ -1076,127 +1221,202 @@
       );
     })();
 
-    const schemesPane = React.createElement("div", { style: { ...styles.schemeBox, maxHeight: "calc(100vh - 150px)", overflowY: "auto" } },
-      React.createElement("div", { style: { fontWeight: 600, marginBottom: 8 } }, "方案与链路（当前激活：" + state.activeScheme + "）"),
-      React.createElement("div", { style: { margin: "0 0 10px", padding: "10px 12px", background: "#eef6ee", border: "1px solid #cde6cd", borderRadius: 8, fontSize: 13 } },
-        React.createElement("div", { style: { fontWeight: 600, marginBottom: 4 } }, "当前实际使用",
-          React.createElement("button", { style: { ...styles.btn, marginLeft: 8 }, onClick: loadCurrent }, "刷新")),
-        current?.lastUse
-          ? React.createElement("div", null,
-              React.createElement("div", null, "供应商：", React.createElement("b", null, friendlyProvider(current.lastUse.provider)), "　模型：", React.createElement("b", null, friendlyModel(current.lastUse.provider, current.lastUse.model))),
-              React.createElement("div", { style: { color: "#666", marginTop: 2 } }, `方案 ${current.lastUse.scheme} · 尝试 ${current.lastUse.attempts} 条 · ${(() => {
-                // 命中时间可能是上次进程留下的（lastUse 已落盘），跨天时带上日期，
-                // 否则一个昨天的 17:07 会被读成「刚才」。
+    // 当前冷却字典快速映射
+    const coolingMap = {};
+    if (current && Array.isArray(current.cooling)) {
+      for (const item of current.cooling) {
+        coolingMap[item.entry] = item;
+      }
+    }
+
+    // 顶部 Hero 运行态仪表板
+    const heroCard = React.createElement("div", {
+      style: {
+        marginBottom: 14,
+        padding: "12px 16px",
+        background: "var(--dsw-alias-bg-layer-1, #f8f9fa)",
+        border: "1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.08))",
+        borderRadius: 8,
+        fontSize: 13
+      }
+    },
+      // 顶行：状态标题 + 刷新按钮
+      React.createElement("div", {
+        style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }
+      },
+        React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8 } },
+          React.createElement("span", { style: { fontWeight: 600, fontSize: 14 } }, "⚡ 模型池实时运行态"),
+          React.createElement("span", {
+            style: {
+              fontSize: 11,
+              padding: "2px 8px",
+              borderRadius: 4,
+              background: "var(--dsw-alias-brand-light, rgba(79, 70, 229, 0.1))",
+              color: "var(--dsw-alias-button-primary-fill, #4f46e5)",
+              fontWeight: 500
+            }
+          }, "当前方案: " + state.activeScheme)
+        ),
+        React.createElement("button", {
+          type: "button",
+          style: { ...styles.btn, height: 24, padding: "0 8px", fontSize: 11 },
+          onClick: loadCurrent
+        }, "↻ 刷新运行态")
+      ),
+
+      // 在线服务模型指示卡
+      current?.lastUse
+        ? React.createElement("div", {
+            style: {
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              padding: "8px 12px",
+              background: "var(--dsw-alias-bg-layer-2, rgba(0,0,0,0.03))",
+              borderRadius: 6,
+              border: "1px solid var(--dsw-alias-border-l3, rgba(0,0,0,0.04))"
+            }
+          },
+            React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8 } },
+              React.createElement("span", { style: { color: "var(--dsw-alias-state-success-primary, #1a7f37)", fontSize: 14 } }, "●"),
+              React.createElement("span", { style: { color: "var(--dsw-alias-label-secondary, #666)" } }, "在线服务："),
+              React.createElement("b", { style: { color: "var(--dsw-alias-label-primary, #111)" } },
+                friendlyModel(current.lastUse.provider, current.lastUse.model)),
+              React.createElement("span", { style: { fontSize: 12, color: "var(--dsw-alias-label-tertiary, #888)" } },
+                "(" + friendlyProvider(current.lastUse.provider) + ")")
+            ),
+            React.createElement("div", { style: { fontSize: 12, color: "var(--dsw-alias-label-secondary, #666)" } },
+              `方案 ${current.lastUse.scheme} · 尝试 ${current.lastUse.attempts} 次 · ${(() => {
                 const d = new Date(current.lastUse.at);
                 const sameDay = d.toDateString() === new Date().toDateString();
                 return (sameDay ? "" : `${d.getMonth() + 1}/${d.getDate()} `) + d.toLocaleTimeString();
               })()}`)
-            )
-          : React.createElement("div", { style: { color: "#888" } }, "尚未通过模型池发起请求"),
-        current && Array.isArray(current.attempts) && current.attempts.some((a) => !a.ok)
-          ? React.createElement("div", { style: { marginTop: 8, paddingTop: 6, borderTop: "1px dashed #cde6cd" } },
-              React.createElement("div", { style: { fontWeight: 600, color: "#a15c00", marginBottom: 2 } }, "本次失败/跳过的渠道"),
-              current.attempts.filter((a) => !a.ok).slice(-3).map((a, i) =>
-                React.createElement("div", {
-                  key: "att" + i,
-                  style: { fontSize: 12, color: "#a15c00", display: "flex", alignItems: "center", gap: 6, marginTop: 2 }
-                },
-                  React.createElement("span", {
-                    style: { flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
-                    title: a.error || ""
-                  }, `${a.entry}${a.skipped ? "（跳过）" : a.midStream ? "（中途断流）" : ""}：${a.error || "未记录原因"}`),
-                  React.createElement("button", {
-                    type: "button",
-                    style: {
-                      background: "#fff",
-                      border: "1px solid #d0d7de",
-                      borderRadius: 3,
-                      padding: "0 6px",
-                      fontSize: 11,
-                      lineHeight: "16px",
-                      color: "#0969da",
-                      cursor: "pointer",
-                      flexShrink: 0
-                    },
-                    title: "查看此渠道的完整错误原因、状态码与执行详情",
-                    onClick: () => setDetailModal(a)
-                  }, "详情")
-                )
+          )
+        : React.createElement("div", {
+            style: {
+              padding: "8px 12px",
+              color: "var(--dsw-alias-label-tertiary, #888)",
+              background: "var(--dsw-alias-bg-layer-2, rgba(0,0,0,0.03))",
+              borderRadius: 6
+            }
+          }, "尚未通过模型池发起请求"),
+
+      // 熔断与冷却退避条
+      current && Array.isArray(current.cooling) && current.cooling.length > 0
+        ? React.createElement("div", {
+            style: {
+              marginTop: 10,
+              padding: "8px 12px",
+              borderRadius: 6,
+              background: "rgba(234, 88, 12, 0.08)",
+              border: "1px solid rgba(234, 88, 12, 0.2)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 8,
+              flexWrap: "wrap"
+            }
+          },
+            React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", fontSize: 12 } },
+              React.createElement("span", { style: { color: "#c2410c", fontWeight: 600 } }, `⏳ 熔断冷却 (${current.cooling.length})：`),
+              ...current.cooling.map((x) => React.createElement("span", {
+                key: x.entry,
+                style: {
+                  padding: "1px 6px",
+                  borderRadius: 4,
+                  background: "var(--dsw-alias-bg-layer-1, #fff)",
+                  border: "1px solid rgba(234, 88, 12, 0.3)",
+                  color: "#c2410c",
+                  fontSize: 11
+                }
+              }, `${x.entry} · 剩 ${Math.ceil(x.remainingMs / 1000)}s${(x.streak ?? 1) > 1 ? ` (退避${x.streak}级)` : ""}`))
+            ),
+            React.createElement("button", {
+              type: "button",
+              style: {
+                ...styles.btn,
+                height: 24,
+                padding: "0 8px",
+                fontSize: 11,
+                color: "var(--dsw-alias-button-primary-fill, #4f46e5)",
+                borderColor: "var(--dsw-alias-border-l2, #ddd)",
+                fontWeight: 500
+              },
+              title: "清空所有渠道的冷却计时并重置退避阶梯，使其立即参与调度",
+              onClick: async () => {
+                try {
+                  await api("/api/model-pool/clear-cooldown", { method: "POST" });
+                  await loadCurrent();
+                } catch { /* 忽略 */ }
+              }
+            }, "↺ 立即清空冷却与退避")
+          )
+        : null,
+
+      // 本次跳过/受限渠道（带详情弹窗）
+      current && Array.isArray(current.attempts) && current.attempts.some((a) => !a.ok)
+        ? React.createElement("div", {
+            style: {
+              marginTop: 10,
+              padding: "8px 12px",
+              borderRadius: 6,
+              background: "var(--dsw-alias-bg-layer-2, rgba(0,0,0,0.03))",
+              border: "1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.06))"
+            }
+          },
+            React.createElement("div", { style: { fontWeight: 600, color: "var(--dsw-alias-label-secondary, #666)", fontSize: 12, marginBottom: 4 } }, "本次跳过 / 受限渠道："),
+            current.attempts.filter((a) => !a.ok).slice(-3).map((a, i) =>
+              React.createElement("div", {
+                key: "att" + i,
+                style: { fontSize: 12, display: "flex", alignItems: "center", gap: 6, marginTop: 3 }
+              },
+                React.createElement("span", {
+                  style: {
+                    padding: "1px 5px",
+                    borderRadius: 3,
+                    fontSize: 10,
+                    background: a.skipped ? "rgba(9, 105, 218, 0.1)" : "rgba(207, 34, 46, 0.1)",
+                    color: a.skipped ? "#0969da" : "#cf222e"
+                  }
+                }, a.skipped ? "避障跳过" : a.midStream ? "中途断流" : "调用失败"),
+                React.createElement("span", {
+                  style: { flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--dsw-alias-label-secondary, #555)" },
+                  title: a.error || ""
+                }, `${a.entry}：${a.error || "未记录原因"}`),
+                React.createElement("button", {
+                  type: "button",
+                  style: {
+                    ...styles.btn,
+                    height: 20,
+                    padding: "0 6px",
+                    fontSize: 11,
+                    color: "var(--dsw-alias-button-primary-fill, #4f46e5)",
+                    flexShrink: 0
+                  },
+                  title: "查看此渠道的完整错误原因、状态码与执行详情",
+                  onClick: () => setDetailModal(a)
+                }, "详情")
               )
             )
-          : null,
-        current && Array.isArray(current.cooling) && current.cooling.length > 0
-          ? React.createElement("div", { style: { marginTop: 6, fontSize: 12, color: "#666", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" } },
-              React.createElement("span", null, "冷却中：" + current.cooling.map((x) => `${x.entry}（剩 ${Math.ceil(x.remainingMs / 1000)}s${(x.streak ?? 1) > 1 ? ` · 第${x.streak}次退避` : ""}`).join("、")),
-              React.createElement("button", {
-                type: "button",
-                style: {
-                  background: "#fff",
-                  border: "1px solid #d0d7de",
-                  borderRadius: 4,
-                  padding: "1px 7px",
-                  fontSize: 11,
-                  lineHeight: "16px",
-                  color: "#0969da",
-                  cursor: "pointer",
-                  display: "inline-flex",
-                  alignItems: "center"
-                },
-                title: "清空所有渠道的冷却计时并重置退避阶梯，使其立即参与调度",
-                onClick: async () => {
-                  try {
-                    await api("/api/model-pool/clear-cooldown", { method: "POST" });
-                    await loadCurrent();
-                  } catch { /* 忽略 */ }
-                }
-              }, "↺ 立即清空冷却与退避")
-            )
-          : null
-      ),
+          )
+        : null
+    );
+
+    const schemesPane = React.createElement("div", { style: { ...styles.schemeBox, maxHeight: "calc(100vh - 150px)", overflowY: "auto" } },
+      // 1. 运行态看板
+      heroCard,
+
+      // 2. 方案与链路主操作栏
       React.createElement("div", { style: { ...styles.toolbar, marginBottom: 10 } },
-        React.createElement("span", { style: { fontSize: 13, color: "#555" } }, "上下文窗口（token）："),
-        React.createElement("input", {
-          style: { ...styles.select, width: 140 },
-          type: "text",
-          placeholder: "如 128k / 1m",
-          value: ctxInput !== null ? ctxInput : fmtCtx(state.contextWindow),
-          onChange: (e) => setCtxInput(e.target.value),
-          onBlur: () => {
-            const v = parseCtx(ctxInput !== null ? ctxInput : state.contextWindow);
-            setCtxInput(null);
-            api("/api/model-pool/chain", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contextWindow: v }) }).then(loadState);
-          }
-        }),
-        React.createElement("span", { style: { fontSize: 12, color: "#999" } }, "留空=跟随模型默认；支持 k/m 单位，如 128k、0.5m"),
-        React.createElement("span", { style: { fontSize: 13, color: "#555", marginLeft: 10 } }, "失败冷却（秒）："),
-        React.createElement("input", {
-          style: { ...styles.select, width: 84 },
-          type: "text",
-          inputMode: "numeric",
-          placeholder: "60",
-          title: "基准冷却时长；连续失败按指数退避递增（2x、4x...，上限 500 秒），调用成功后自动重置",
-          value: coolInput !== null ? coolInput : String(Math.round((state.cooldownMs ?? 60000) / 1000)),
-          onChange: (e) => setCoolInput(e.target.value),
-          onBlur: () => {
-            const raw = coolInput !== null ? coolInput : String((state.cooldownMs ?? 60000) / 1000);
-            setCoolInput(null);
-            const sec = Number(String(raw).trim());
-            if (!Number.isFinite(sec) || sec <= 0) return; // 非法输入不写，直接回显原值
-            const clamped = Math.min(Math.max(Math.round(sec), 5), 3600);
-            api("/api/model-pool/chain", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cooldownMs: clamped * 1000 }) }).then(loadState);
-          }
-        }),
-        React.createElement("span", { style: { fontSize: 12, color: "#999" } }, "失败基准冷却；连续失败指数退避至多 500s")
-      ),
-      React.createElement("div", { style: styles.toolbar },
-        React.createElement("select", { style: styles.select, value: state.activeScheme, onChange: (e) => switchScheme(e.target.value) },
+        React.createElement("span", { style: { fontSize: 12, color: "var(--dsw-alias-label-secondary, #666)", fontWeight: 500 } }, "当前方案:"),
+        React.createElement("select", { style: { ...styles.select, fontWeight: 500 }, value: state.activeScheme, onChange: (e) => switchScheme(e.target.value) },
           Object.keys(state.schemes || {}).map((n) => React.createElement("option", { key: n, value: n }, n))
         ),
-        React.createElement("button", { style: { ...styles.btn, ...styles.btnPrimary }, onClick: testChain, disabled: busy }, busy ? "自检中…" : "测试当前链路"),
-        React.createElement("button", { style: styles.btn, onClick: () => saveScheme(state.activeScheme, builtinRank("tier")) }, "同档聚类重排"),
+        React.createElement("button", { style: { ...styles.btn, ...styles.btnPrimary }, onClick: testChain, disabled: busy }, busy ? "自检中…" : "⚡ 测试当前链路"),
+        React.createElement("button", { style: styles.btn, onClick: () => saveScheme(state.activeScheme, builtinRank("tier")) }, "同档聚类"),
         React.createElement("button", { style: styles.btn, onClick: () => saveScheme(state.activeScheme, builtinRank("latency")) }, "延迟优先"),
         React.createElement("button", { style: styles.btn, onClick: () => saveScheme(state.activeScheme, builtinRank("free")) }, "免费优先"),
-        React.createElement("button", { style: { ...styles.btn, ...styles.btnPrimary }, onClick: addCheckedToScheme }, "+ 勾选加入当前方案"),
+        React.createElement("button", { style: styles.btn, onClick: addCheckedToScheme }, "+ 勾选追加入链"),
         React.createElement("select", {
           style: styles.select,
           title: "本方案统一思考强度；降级换供应商时强度保持一致",
@@ -1208,44 +1428,243 @@
           }
         },
           React.createElement("option", { value: "" }, "思考强度：跟随宿主"),
-          React.createElement("option", { value: "minimal" }, "关闭/最低"),
-          React.createElement("option", { value: "low" }, "低"),
-          React.createElement("option", { value: "medium" }, "中"),
-          React.createElement("option", { value: "high" }, "高")
+          React.createElement("option", { value: "minimal" }, "思考：关闭/最低"),
+          React.createElement("option", { value: "low" }, "思考：低"),
+          React.createElement("option", { value: "medium" }, "思考：中"),
+          React.createElement("option", { value: "high" }, "思考：高")
         )
       ),
-      React.createElement("div", { style: styles.toolbar },
-        React.createElement("input", { style: { ...styles.select, width: 180 }, placeholder: "新方案名，如 纯 deepseek", value: newScheme, onChange: (e) => setNewScheme(e.target.value) }),
-        React.createElement("button", { style: { ...styles.btn, ...styles.btnPrimary }, onClick: () => { if (newScheme) { saveScheme(newScheme, builtinRank("tier")); setNewScheme(""); } } }, "由勾选内容新建方案")
-      ),
-      React.createElement("div", { style: { margin: "10px 0 6px", color: "#666" } }, "当前链（" + activeChain.length + "），拖拽手柄调整顺序："),
-      chainSummary,
-      activeChain.map((c, i) => React.createElement("div", {
-        key: i, draggable: true,
-        onDragStart: onDragStart(i), onDragOver: onDragOverItem, onDrop: onDropItem(i),
-        style: styles.chainItem
+
+      // 3. 新建方案与参数微调栏
+      React.createElement("div", {
+        style: {
+          display: "flex",
+          gap: 12,
+          flexWrap: "wrap",
+          alignItems: "center",
+          marginBottom: 12,
+          padding: "8px 12px",
+          background: "var(--dsw-alias-bg-layer-1, rgba(0,0,0,0.02))",
+          borderRadius: 6,
+          border: "1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.06))",
+          fontSize: 12
+        }
       },
-        React.createElement("span", { style: styles.dragHandle }, "⠿"),
-        React.createElement("span", { style: { color: "#999", width: 22 } }, i + 1),
-        React.createElement("span", null, friendlyChain(c)),
-        testing[c] === true
-          ? React.createElement("span", { style: { marginLeft: 8, fontSize: 12, color: "#4f46e5" } }, "测中…")
-          : (() => {
-              const r = results[c];
-              if (!r) return null;
-              const col = r.status === "ok" ? "#12b76a" : r.status === "skip" ? "#98a2b3" : "#f04438";
-              const label = r.status === "ok" ? `${r.latency}ms` : r.status === "skip" ? "跳过" : "失败";
-              return React.createElement("span", { style: { marginLeft: 8, fontSize: 12, color: col }, title: r.error || "" }, `● ${label}`);
-            })(),
-        // 链路内测单个条目：qoder-intl 这类"整轮自检里没有结果"的，可以单独打一发看真实报错
-        React.createElement("button", {
-          style: { ...styles.btn, height: 20, padding: "0 8px", fontSize: 11 },
-          disabled: testing[c] === true,
-          title: "只测这一条（向该供应商/模型发一个最小请求）",
-          onClick: () => void testOne(c)
-        }, testing[c] === true ? "…" : "测"),
-        React.createElement("button", { style: styles.removeBtn, onClick: () => removeChainItem(i) }, "移除")
-      ))
+        React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6 } },
+          React.createElement("input", { style: { ...styles.select, width: 150 }, placeholder: "新方案名，如 代码主力", value: newScheme, onChange: (e) => setNewScheme(e.target.value) }),
+          React.createElement("button", { style: { ...styles.btn, ...styles.btnPrimary }, onClick: () => { if (newScheme) { saveScheme(newScheme, builtinRank("tier")); setNewScheme(""); } } }, "新建方案")
+        ),
+        React.createElement("span", { style: { color: "var(--dsw-alias-border-l2, #ddd)" } }, "|"),
+        React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6 } },
+          React.createElement("span", { style: { color: "var(--dsw-alias-label-secondary, #666)" } }, "上下文:"),
+          React.createElement("input", {
+            style: { ...styles.select, width: 90, height: 24, fontSize: 11 },
+            type: "text",
+            placeholder: "如 128k",
+            value: ctxInput !== null ? ctxInput : fmtCtx(state.contextWindow),
+            onChange: (e) => setCtxInput(e.target.value),
+            onBlur: () => {
+              const v = parseCtx(ctxInput !== null ? ctxInput : state.contextWindow);
+              setCtxInput(null);
+              api("/api/model-pool/chain", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contextWindow: v }) }).then(loadState);
+            }
+          })
+        ),
+        React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6 } },
+          React.createElement("span", { style: { color: "var(--dsw-alias-label-secondary, #666)" } }, "基准冷却(秒):"),
+          React.createElement("input", {
+            style: { ...styles.select, width: 60, height: 24, fontSize: 11 },
+            type: "text",
+            inputMode: "numeric",
+            placeholder: "60",
+            title: "基准冷却时长；连续失败指数退避至多 500 秒",
+            value: coolInput !== null ? coolInput : String(Math.round((state.cooldownMs ?? 60000) / 1000)),
+            onChange: (e) => setCoolInput(e.target.value),
+            onBlur: () => {
+              const raw = coolInput !== null ? coolInput : String((state.cooldownMs ?? 60000) / 1000);
+              setCoolInput(null);
+              const sec = Number(String(raw).trim());
+              if (!Number.isFinite(sec) || sec <= 0) return;
+              const clamped = Math.min(Math.max(Math.round(sec), 5), 3600);
+              api("/api/model-pool/chain", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cooldownMs: clamped * 1000 }) }).then(loadState);
+            }
+          })
+        )
+      ),
+
+      // 4. 链路自检小结
+      chainSummary,
+
+      // 5. 方案 B：高密精简工单表格
+      activeChain.length === 0
+        ? React.createElement("div", {
+            style: {
+              padding: "24px 12px",
+              textAlign: "center",
+              color: "var(--dsw-alias-label-tertiary, #888)",
+              background: "var(--dsw-alias-bg-layer-1, rgba(0,0,0,0.02))",
+              borderRadius: 6,
+              border: "1px dashed var(--dsw-alias-border-l2, #ddd)",
+              fontSize: 12
+            }
+          }, "当前方案链路为空，请从上方按钮「+ 勾选追加入链」或由勾选内容新建方案")
+        : React.createElement("div", {
+            style: {
+              border: "1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.08))",
+              borderRadius: 6,
+              overflow: "hidden",
+              background: "var(--dsw-alias-bg-layer-1, #fff)"
+            }
+          },
+            React.createElement("table", { style: styles.table },
+              React.createElement("thead", null,
+                React.createElement("tr", null,
+                  React.createElement("th", { style: { ...styles.th, width: 44, textAlign: "center" } }, "序"),
+                  React.createElement("th", { style: { ...styles.th, width: 90 } }, "梯队角色"),
+                  React.createElement("th", { style: styles.th }, "目标模型 (Model)"),
+                  React.createElement("th", { style: { ...styles.th, width: 120 } }, "服务商"),
+                  React.createElement("th", { style: { ...styles.th, width: 110 } }, "健康度 / 延迟"),
+                  React.createElement("th", { style: { ...styles.th, width: 116, textAlign: "right" } }, "操作")
+                )
+              ),
+              React.createElement("tbody", null,
+                activeChain.map((c, i) => {
+                  const row = modelByKey[c];
+                  const idx = String(c).indexOf("/");
+                  const provider = row ? row.provider : (idx > 0 ? c.slice(0, idx) : "");
+                  const modelId = row ? row.modelId : (idx > 0 ? c.slice(idx + 1) : c);
+                  const modelName = row ? (row.modelName || row.modelId) : modelId;
+                  const provName = friendlyProvider(provider);
+
+                  // 梯队标识
+                  const tierBadge = i === 0
+                    ? { text: "🥇 主力", bg: "rgba(245, 158, 11, 0.12)", color: "#b45309", border: "rgba(245, 158, 11, 0.3)" }
+                    : i === 1
+                    ? { text: "🥈 备用", bg: "rgba(100, 116, 139, 0.12)", color: "#475569", border: "rgba(100, 116, 139, 0.3)" }
+                    : i === 2
+                    ? { text: "🥉 替补", bg: "rgba(180, 83, 9, 0.1)", color: "#9a3412", border: "rgba(180, 83, 9, 0.25)" }
+                    : { text: "🛡️ 兜底", bg: "var(--dsw-alias-bg-layer-2, rgba(0,0,0,0.04))", color: "var(--dsw-alias-label-tertiary, #666)", border: "var(--dsw-alias-border-l2, rgba(0,0,0,0.08))" };
+
+                  // 特性标签检测
+                  const hasVision = /vision|vl|-v\b|4o|gemini|claude|omni|pixtral|minicpm-v|internvl|qwen.*max|qwen.*plus|glm-4v|glm-5/i.test(modelId) && !/coder|code/i.test(modelId);
+                  const isReasoning = /reasoner|r1|o1|o3|thinking|thought/i.test(modelId);
+                  const isFree = row?.free === true;
+
+                  // 冷却与测试状态（钉住探测用例 r = results[c]）
+                  const coolingItem = coolingMap[c];
+                  const r = results[c];
+
+                  return React.createElement("tr", {
+                    key: c + "_" + i,
+                    draggable: true,
+                    onDragStart: onDragStart(i),
+                    onDragOver: onDragOverItem,
+                    onDrop: onDropItem(i),
+                    style: {
+                      cursor: "grab",
+                      borderBottom: "1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.06))",
+                      transition: "background 0.12s"
+                    }
+                  },
+                    // 序号与手柄
+                    React.createElement("td", { style: { ...styles.td, textAlign: "center", color: "var(--dsw-alias-label-tertiary, #999)", userSelect: "none" } },
+                      React.createElement("span", { style: styles.dragHandle, title: "按住拖拽排序" }, "⠿"),
+                      React.createElement("span", { style: { fontSize: 11, fontFamily: "monospace" } }, String(i + 1).padStart(2, "0"))
+                    ),
+
+                    // 梯队角色
+                    React.createElement("td", { style: styles.td },
+                      React.createElement("span", {
+                        style: {
+                          padding: "2px 6px",
+                          borderRadius: 4,
+                          fontSize: 11,
+                          fontWeight: 600,
+                          background: tierBadge.bg,
+                          color: tierBadge.color,
+                          border: "1px solid " + tierBadge.border
+                        }
+                      }, tierBadge.text)
+                    ),
+
+                    // 目标模型
+                    React.createElement("td", { style: styles.td },
+                      React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } },
+                        React.createElement("span", { style: { fontWeight: 600, fontSize: 12 }, title: modelId }, modelName),
+                        hasVision && React.createElement("span", {
+                          style: { padding: "1px 5px", borderRadius: 3, fontSize: 10, background: "rgba(14, 165, 233, 0.12)", color: "#0284c7" },
+                          title: "多模态视觉模型（图片输入自动智能引导）"
+                        }, "🖼️ VL"),
+                        isReasoning && React.createElement("span", {
+                          style: { padding: "1px 5px", borderRadius: 3, fontSize: 10, background: "rgba(99, 102, 241, 0.12)", color: "#4f46e5" },
+                          title: "深度思考/推理模型"
+                        }, "🧠 思考"),
+                        isFree && React.createElement("span", {
+                          style: { padding: "1px 5px", borderRadius: 3, fontSize: 10, background: "rgba(16, 185, 129, 0.12)", color: "#059669" },
+                          title: "免费公共额度"
+                        }, "🆓 免费")
+                      ),
+                      modelName !== modelId && React.createElement("div", { style: { fontSize: 10, color: "var(--dsw-alias-label-tertiary, #888)", fontFamily: "monospace" } }, modelId)
+                    ),
+
+                    // 服务商
+                    React.createElement("td", { style: { ...styles.td, color: "var(--dsw-alias-label-secondary, #555)" } }, provName),
+
+                    // 健康度 / 延迟
+                    React.createElement("td", { style: styles.td },
+                      testing[c] === true
+                        ? React.createElement("span", { style: { marginLeft: 8, fontSize: 12, color: "#4f46e5" } }, "测中…")
+                        : coolingItem
+                        ? React.createElement("span", {
+                            style: { ...styles.badge, background: "rgba(234, 88, 12, 0.1)", color: "#c2410c", border: "1px solid rgba(234, 88, 12, 0.3)" },
+                            title: `连续失败 ${(coolingItem.streak ?? 1)} 次触发退避`
+                          }, `⏳ 剩 ${Math.ceil(coolingItem.remainingMs / 1000)}s`)
+                        : (() => {
+                            if (!r) return React.createElement("span", { style: { ...styles.badge, ...styles.idle } }, "○ 待命");
+                            return React.createElement("span", {
+                              style: { ...styles.badge, ...(r.status === "ok" ? styles.ok : r.status === "skip" ? styles.skip : styles.fail) },
+                              title: r.error || ""
+                            }, `● ${r.status === "ok" ? `${r.latency}ms` : r.status === "skip" ? "跳过" : "失败"}`);
+                          })()
+                    ),
+
+                    // 操作按钮组
+                    React.createElement("td", { style: { ...styles.td, textAlign: "right" } },
+                      React.createElement("div", { style: { display: "inline-flex", gap: 3, alignItems: "center" } },
+                        React.createElement("button", {
+                          type: "button",
+                          style: { ...styles.btn, width: 22, height: 22, padding: 0, fontSize: 10, opacity: i === 0 ? 0.3 : 1 },
+                          disabled: i === 0,
+                          title: "上移一位",
+                          onClick: () => moveChainItem(i, -1)
+                        }, "▲"),
+                        React.createElement("button", {
+                          type: "button",
+                          style: { ...styles.btn, width: 22, height: 22, padding: 0, fontSize: 10, opacity: i === activeChain.length - 1 ? 0.3 : 1 },
+                          disabled: i === activeChain.length - 1,
+                          title: "下移一位",
+                          onClick: () => moveChainItem(i, 1)
+                        }, "▼"),
+                        React.createElement("button", {
+                          type: "button",
+                          style: { ...styles.btn, height: 22, padding: "0 6px", fontSize: 11, color: "var(--dsw-alias-button-primary-fill, #4f46e5)" },
+                          disabled: testing[c] === true,
+                          title: "只测这一条（向该供应商/模型发一个最小请求）",
+                          onClick: () => void testOne(c)
+                        }, testing[c] === true ? "…" : "⚡"),
+                        React.createElement("button", {
+                          type: "button",
+                          style: { ...styles.btn, width: 22, height: 22, padding: 0, fontSize: 11, color: "var(--dsw-alias-state-error-primary, #cf222e)" },
+                          title: "从当前链路中移除",
+                          onClick: () => removeChainItem(i)
+                        }, "✕")
+                      )
+                    )
+                  );
+                })                })
+              )
+            )
+          )
     );
 
     const renderDetailModal = () => {
@@ -1257,62 +1676,64 @@
           left: 0,
           right: 0,
           bottom: 0,
-          backgroundColor: "rgba(0, 0, 0, 0.45)",
+          backgroundColor: "rgba(0, 0, 0, 0.55)",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          zIndex: 99999
+          zIndex: 99999,
+          backdropFilter: "blur(2px)"
         },
         onClick: () => setDetailModal(null)
       },
         React.createElement("div", {
           style: {
-            background: "#fff",
+            background: "var(--dsw-alias-bg-layer-1, #ffffff)",
             borderRadius: 8,
-            padding: "16px 20px",
-            width: 580,
+            padding: "18px 22px",
+            width: 600,
             maxWidth: "92vw",
             maxHeight: "82vh",
             overflow: "auto",
-            boxShadow: "0 8px 24px rgba(0, 0, 0, 0.2)",
+            boxShadow: "0 12px 32px rgba(0, 0, 0, 0.28)",
             fontSize: 13,
-            color: "#24292f"
+            color: "var(--dsw-alias-label-primary, #1f2328)",
+            border: "1px solid var(--dsw-alias-border-l1, rgba(0,0,0,0.1))"
           },
           onClick: (e) => e.stopPropagation()
         },
-          React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, borderBottom: "1px solid #eee", paddingBottom: 8 } },
-            React.createElement("span", { style: { fontWeight: 600, fontSize: 14 } }, "渠道失败/跳过诊断详情"),
+          React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, borderBottom: "1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.08))", paddingBottom: 10 } },
+            React.createElement("span", { style: { fontWeight: 600, fontSize: 15 } }, "🔍 渠道失败 / 跳过诊断详情"),
             React.createElement("button", {
               type: "button",
-              style: { background: "none", border: "none", fontSize: 18, cursor: "pointer", color: "#666", lineHeight: 1 },
+              style: { background: "none", border: "none", fontSize: 18, cursor: "pointer", color: "var(--dsw-alias-label-tertiary, #888)", lineHeight: 1 },
               onClick: () => setDetailModal(null)
-            }, "×")
+            }, "✕")
           ),
-          React.createElement("div", { style: { display: "grid", gridTemplateColumns: "84px 1fr", gap: "6px 12px", marginBottom: 12, fontSize: 12 } },
-            React.createElement("span", { style: { color: "#666" } }, "渠道标识:"),
+          React.createElement("div", { style: { display: "grid", gridTemplateColumns: "84px 1fr", gap: "8px 12px", marginBottom: 14, fontSize: 12 } },
+            React.createElement("span", { style: { color: "var(--dsw-alias-label-secondary, #666)" } }, "渠道标识:"),
             React.createElement("span", { style: { fontFamily: "monospace", fontWeight: 600 } }, detailModal.entry || "—"),
-            React.createElement("span", { style: { color: "#666" } }, "发生时间:"),
+            React.createElement("span", { style: { color: "var(--dsw-alias-label-secondary, #666)" } }, "发生时间:"),
             React.createElement("span", null, new Date(detailModal.at || Date.now()).toLocaleString()),
-            React.createElement("span", { style: { color: "#666" } }, "执行耗时:"),
-            React.createElement("span", null, detailModal.durationMs ? `${detailModal.durationMs} ms` : "—"),
-            React.createElement("span", { style: { color: "#666" } }, "事件类别:"),
-            React.createElement("span", { style: { color: detailModal.skipped ? "#0969da" : "#cf222e", fontWeight: 600 } },
+            React.createElement("span", { style: { color: "var(--dsw-alias-label-secondary, #666)" } }, "执行耗时:"),
+            React.createElement("span", null, detailModal.durationMs ? detailModal.durationMs + " ms" : "—"),
+            React.createElement("span", { style: { color: "var(--dsw-alias-label-secondary, #666)" } }, "事件类别:"),
+            React.createElement("span", { style: { color: detailModal.skipped ? "#0969da" : "var(--dsw-alias-state-error-primary, #cf222e)", fontWeight: 600 } },
               detailModal.skipped ? "避障跳过 (Skipped)" : detailModal.midStream ? "中途断流 (Mid-stream)" : "发起级失败 (Connect Fail)"),
-            detailModal.status ? React.createElement("span", { style: { color: "#666" } }, "HTTP 状态:") : null,
-            detailModal.status ? React.createElement("span", { style: { fontFamily: "monospace", color: "#cf222e", fontWeight: 600 } }, `HTTP ${detailModal.status}`) : null,
-            detailModal.code ? React.createElement("span", { style: { color: "#666" } }, "错误代码:") : null,
+            detailModal.status ? React.createElement("span", { style: { color: "var(--dsw-alias-label-secondary, #666)" } }, "HTTP 状态:") : null,
+            detailModal.status ? React.createElement("span", { style: { fontFamily: "monospace", color: "var(--dsw-alias-state-error-primary, #cf222e)", fontWeight: 600 } }, "HTTP " + detailModal.status) : null,
+            detailModal.code ? React.createElement("span", { style: { color: "var(--dsw-alias-label-secondary, #666)" } }, "错误代码:") : null,
             detailModal.code ? React.createElement("span", { style: { fontFamily: "monospace" } }, String(detailModal.code)) : null,
-            React.createElement("span", { style: { color: "#666" } }, "错误摘要:"),
-            React.createElement("span", { style: { color: "#a15c00" } }, detailModal.error || "未记录错误摘要")
+            React.createElement("span", { style: { color: "var(--dsw-alias-label-secondary, #666)" } }, "错误摘要:"),
+            React.createElement("span", { style: { color: "#c2410c", fontWeight: 500 } }, detailModal.error || "未记录错误摘要")
           ),
           React.createElement("div", { style: { marginTop: 8 } },
-            React.createElement("div", { style: { fontWeight: 600, marginBottom: 4, color: "#555", fontSize: 12 } }, "原始错误报文 / 堆栈 (Raw Payload):"),
+            React.createElement("div", { style: { fontWeight: 600, marginBottom: 6, color: "var(--dsw-alias-label-secondary, #555)", fontSize: 12 } }, "原始错误报文 / 堆栈 (Raw Payload):"),
             React.createElement("pre", {
               style: {
-                background: "#f6f8fa",
-                border: "1px solid #d0d7de",
+                background: "var(--dsw-alias-bg-layer-2, #f6f8fa)",
+                border: "1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.1))",
                 borderRadius: 6,
-                padding: "8px 10px",
+                padding: "10px 12px",
                 maxHeight: 220,
                 overflow: "auto",
                 fontFamily: "monospace",
@@ -1320,11 +1741,12 @@
                 lineHeight: "16px",
                 whiteSpace: "pre-wrap",
                 wordBreak: "break-all",
+                color: "var(--dsw-alias-label-primary, #1f2328)",
                 margin: 0
               }
             }, detailModal.rawError || detailModal.error || "无更详细的上游报文")
           ),
-          React.createElement("div", { style: { display: "flex", justifyContent: "flex-end", marginTop: 14 } },
+          React.createElement("div", { style: { display: "flex", justifyContent: "flex-end", marginTop: 16 } },
             React.createElement("button", {
               type: "button",
               style: { ...styles.btn, ...styles.btnPrimary },
