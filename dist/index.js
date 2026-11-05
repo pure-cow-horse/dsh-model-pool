@@ -788,7 +788,18 @@ function readState(profile) {
 function writeState(profile, state) {
   const fp = dataFile(profile);
   mkdirSync(dirname(fp), { recursive: true });
-  writeFileSync(fp, JSON.stringify(state, null, 2), "utf8");
+  // 原子写（2026-11-05）：原来直接 writeFileSync 覆盖，进程在写一半退出会留下
+  // 半份 JSON；而 readState 的 catch 是静默返回空配置的，前端随后一保存就拿
+  // 那个空对象覆盖回去 —— 用户的方案、链、档位记忆会一起没。这里改成
+  // tmp + rename，与 usage 台账同一套做法；写失败时旧文件保持完好。
+  const tmp = `${fp}.${process.pid}.tmp`;
+  try {
+    writeFileSync(tmp, JSON.stringify(state, null, 2), "utf8");
+    renameSync(tmp, fp);
+  } catch (e) {
+    try { if (existsSync(tmp)) unlinkSync(tmp); } catch { /* 清理失败无所谓 */ }
+    throw e; // /chain 等调用方需要知道没存上，不能假装成功
+  }
   try {
     const stamp = statSync(fp);
     stateCache.set(fp, { mtimeMs: stamp.mtimeMs, size: stamp.size, value: state });
@@ -910,6 +921,7 @@ class PoolAdapter {
     this.failureStreaks = new Map(); // entry -> 连续失败次数
     this.visionCache = new Map(); // entry -> boolean (多模态能力缓存)
     this.lastUse = null;       // 最近一次成功命中 {scheme,provider,model,entry,at,attempts}
+    this.lastModel = void 0;   // 最近一次 stream 的虚拟模型 id（方案名或 Auto）
     this.attempts = [];        // 最近一次调用的逐条尝试记录
     this.registered = new Set(); // 宿主当前已注册 adapter 的 provider id 缓存；空=未知，不硬过滤
     // entry → { effort, until }：该渠道明确拒绝过的 reasoning 档位，10 分钟内直接跳过
@@ -1043,7 +1055,10 @@ class PoolAdapter {
   }
   providerRetryPolicy() {
     try {
-      const head = this._head();
+      // 用最近一次真实请求的模型（方案）取链头（2026-11-05）。原来无参调
+      // `_head()` 一律按激活方案算：当对话用的是 `ModelPool/<别的方案>` 时，
+      // 重试策略会取自另一个方案的第一个候选。
+      const head = this._head(this.lastModel);
       const llm = this.getLlm();
       if (!head || typeof llm?.providerRetryPolicy !== "function") return undefined;
       return llm.providerRetryPolicy(head.provider);
@@ -1051,7 +1066,8 @@ class PoolAdapter {
   }
   imageRequestPricing() {
     try {
-      const head = this._head();
+      // 同上：按最近一次请求的方案取链头，而不是无条件用激活方案。
+      const head = this._head(this.lastModel);
       const llm = this.getLlm();
       if (!head || typeof llm?.imageRequestPricing !== "function") return undefined;
       return llm.imageRequestPricing(head.provider, head.model);
@@ -1070,7 +1086,14 @@ class PoolAdapter {
     if (!llm) throw new Error("ModelPool: llm 运行时不可用");
     if (chain.length === 0) throw new Error(`ModelPool: 方案「${schemeName || "未命名"}」链路为空，请在面板勾选模型并保存`);
     const now = Date.now();
-    this.attempts = [];
+    // 每次调用一份独立的尝试记录（2026-11-05）。原来直接 `this.attempts = []`
+    // 并在循环里往这个实例字段里 push：两个会话（多标签同时对话）时后开始的
+    // 那次会把前一次的数组清掉，两边的记录混在同一个数组里，面板上"本次失败/
+    // 跳过的渠道"就会显示成别人的。现在每次调用用局部数组，`this.attempts`
+    // 只指向最近一次开始的那份，供 status() 实时读取，写入互不干扰。
+    const attempts = [];
+    this.attempts = attempts;
+    this.lastModel = options?.model;
     // 候选：剔除冷却中
     const candidates = chain.map((entry) => {
       const [provider, ...rest] = entry.split("/");
@@ -1101,7 +1124,7 @@ class PoolAdapter {
         skipped: false,
         midStream: false
       };
-      this.attempts.push(attempt);
+      attempts.push(attempt);
       __poolDiag(`[stream] 尝试 ${c.entry}`);
       // 已注册集合非空时，跳过宿主未注册 adapter 的 provider（如停用对接插件后的 workbuddy/workbuddy-ai）
       if (this.registered.size && !this.registered.has(c.provider)) {
@@ -1138,7 +1161,7 @@ class PoolAdapter {
         try {
           __poolDiag(`[stream] ${c.entry} 尝试变体 effort=${v || "(渠道默认)"}`);
           let yieldedAny = false;
-          for await (const chunk of this._attemptStream(c, options, v, attempt, schemeName, now)) {
+          for await (const chunk of this._attemptStream(c, options, v, attempt, schemeName, now, attempts)) {
             yieldedAny = true;
             yield chunk;
           }
@@ -1152,8 +1175,13 @@ class PoolAdapter {
           const unsupported = /UNSUPPORTED_REASONING_EFFORT|does not support reasoning effort/i.test(msg);
           // 不支持当前强度且还有"去掉强度"这一备选：换变体重试，不冷却
           if (unsupported && v === cEffort && cEffort) {
-            this.effortUnsupported.set(c.entry, { effort, until: now + this.EFFORT_UNSUPPORTED_TTL_MS });
-            __poolDiag(`[stream] ${c.entry} 不支持 effort=${effort}，回落该渠道默认模式重试（${Math.round(this.EFFORT_UNSUPPORTED_TTL_MS / 1000)}s 内不再尝试该档位）`);
+            // 记的是**实际被拒的那个档位** `v`，不是方案默认 `effort`。
+            // 两者只在供应商没有记忆档位时才相等；一旦用户在面板里给某家设了
+            // 非默认档，记错就会让上面的 `blockedEffort.effort === cEffort`
+            // 永远不成立 —— 记忆失效，每回合仍要先吃一次本地拒绝（旧注释所说
+            // 的「270 次/天」空跑）。2026-11-05 修。
+            this.effortUnsupported.set(c.entry, { effort: v, until: now + this.EFFORT_UNSUPPORTED_TTL_MS });
+            __poolDiag(`[stream] ${c.entry} 不支持 effort=${v}，回落该渠道默认模式重试（${Math.round(this.EFFORT_UNSUPPORTED_TTL_MS / 1000)}s 内不再尝试该档位）`);
             continue;
           }
           break; // 其他错误或已试完备选：退出变体循环，走顺延
@@ -1180,7 +1208,7 @@ class PoolAdapter {
     throw lastError || new Error("ModelPool: 链上所有渠道均不可用");
   }
   // 对单条候选发起一次流式请求；effort 为空则不注入 reasoningEffort
-  async *_attemptStream(c, options, effort, attempt, schemeName, now) {
+  async *_attemptStream(c, options, effort, attempt, schemeName, now, attempts = this.attempts) {
     const llm = this.getLlm();
     const fwd = { ...options };
     if (effort) fwd.reasoningEffort = effort;
@@ -1240,7 +1268,7 @@ class PoolAdapter {
           model: c.model,
           entry: c.entry,
           at: now,
-          attempts: this.attempts.length
+          attempts: (Array.isArray(attempts) ? attempts : this.attempts).length
         };
         // 落盘（2026-11-05）：lastUse 原来只在内存里，插件一重载就清空，
         // 输入框的「当前渠道」要等到下一次成功对话才回来。写独立小文件而不是
@@ -1377,8 +1405,23 @@ function apply(ctx) {
   // 虚拟 provider 接管（llm 可选获取，注册失败不阻断面板与探测）
   // lastUse 落盘（2026-11-05）：独立文件，避免与用户配置互相覆盖。
   const lastUsePath = join(profile?.dir || dshHome(), "model-pool-lastuse.json");
-  const persistLastUse = (lu) => {
+  // 节流（2026-11-05）：命中每个回合都会发生，原来每条都同步写一次盘，压在
+  // 流式请求的路径上。改成攒 1 秒合并成一次；定时器 unref 掉不钉住进程退出，
+  // 插件销毁时再主动 flush 一次补齐。这份数据丢了只是刷新后面板少一行渠道名。
+  let lastUseTimer = null;
+  let lastUsePending = null;
+  const flushLastUse = () => {
+    lastUseTimer = null;
+    const lu = lastUsePending;
+    lastUsePending = null;
+    if (!lu) return;
     try { writeFileSync(lastUsePath, JSON.stringify({ lastUse: lu }, null, 2), "utf8"); } catch { /* 写失败无所谓 */ }
+  };
+  const persistLastUse = (lu) => {
+    lastUsePending = lu;
+    if (lastUseTimer !== null) return;
+    lastUseTimer = setTimeout(flushLastUse, 1000);
+    if (typeof lastUseTimer.unref === "function") lastUseTimer.unref();
   };
   const adapter = new PoolAdapter(() => readState(profile), () => llm, persistLastUse);
   // 恢复上次命中：只认 24 小时内的，太旧的显示出来只会误导（at 会被前端当成本次时间）。
@@ -1435,6 +1478,8 @@ function apply(ctx) {
   };
   // 实例销毁时按注册的逆序摘掉，避免路由泄漏到下一个实例
   ctx.effect(() => () => {
+    // 把节流中还没落盘的那条 lastUse 补上，免得刷新刚好卡在 1 秒窗口里
+    try { flushLastUse(); } catch { /* 清理失败不影响其余 */ }
     for (let index = routeDisposers.length - 1; index >= 0; index -= 1) {
       try {
         routeDisposers[index]();

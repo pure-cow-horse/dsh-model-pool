@@ -909,7 +909,7 @@
 
     const usagePane = React.createElement("div", { style: { ...styles.schemeBox, maxHeight: "calc(100vh - 150px)", overflowY: "auto" } },
       // 顶部：范围 + 动作
-      React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" } },
+      React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 14, flexWrap: "wrap" } },
         ...RANGES.map(([span, label]) => React.createElement("button", {
           key: span,
           style: { ...styles.btn, ...(usageSpan === span ? styles.btnPrimary : {}) },
@@ -918,17 +918,17 @@
         React.createElement("button", { style: styles.btn, onClick: () => void loadUsage(), disabled: usageBusy }, usageBusy ? "读取中…" : "刷新"),
         React.createElement("button", { style: styles.btn, onClick: exportUsage, disabled: usage === null }, "导出 CSV"),
         // 来源筛选：只影响"读的数字"（概览/按模型/逐日），对账那行始终全量
-        React.createElement("span", { style: { fontSize: 11, color: "#888", marginLeft: 4 } }, "来源"),
+        React.createElement("span", { style: { fontSize: 12, color: "var(--dsw-alias-label-secondary, #666)", marginLeft: 6, fontWeight: 500 } }, "来源:"),
         ...[["all", "全部"], ["pool", "池子"], ["direct", "直连"]].map(([value, label]) =>
           React.createElement("button", {
             key: value,
-            style: { ...styles.btn, height: 24, padding: "0 10px", ...(sourceFilter === value ? styles.btnPrimary : {}) },
+            style: { ...styles.btn, height: 26, padding: "0 10px", fontSize: 11, ...(sourceFilter === value ? styles.btnPrimary : {}) },
             onClick: () => setSourceFilter(value)
           }, label)),
-        React.createElement("span", { style: { fontSize: 11, color: "#999" } }, "池子=走池子的请求；直连=直接选模型，从会话日志回放")
+        React.createElement("span", { style: { fontSize: 11, color: "var(--dsw-alias-label-tertiary, #999)" } }, "（池子=走池子的请求；直连=直接选模型，从会话日志回放）")
       ),
       usage === null
-        ? React.createElement("div", { style: { color: "#888", fontSize: 12 } },
+        ? React.createElement("div", { style: { color: "var(--dsw-alias-label-tertiary, #888)", fontSize: 12, padding: "20px 0" } },
             usageBusy ? "正在回放会话日志，第一次会慢几秒…" : "还没有数据，点「刷新」读一次")
         : (() => {
             const allRows = usage.rows || [];
@@ -954,79 +954,169 @@
             const poolCount = allRows.filter((row) => row.source === "pool").length;
             const replay = usage.reconcile?.replay ?? {};
             const maxDay = days.reduce((acc, day) => Math.max(acc, usageTotal(day)), 0);
+
+            const totalReqs = overall.requests ?? 0;
+            const totalErrors = overall.errors ?? 0;
+            const successRate = totalReqs > 0 ? (((totalReqs - totalErrors) / totalReqs) * 100).toFixed(1) : "100";
+            const totalTokens = usageTotal(overall);
+            const cacheTokens = overall.cacheReadTokens ?? 0;
+            const inputTokens = overall.uncachedInputTokens ?? 0;
+            const cachePercent = (inputTokens + cacheTokens) > 0 ? ((cacheTokens / (inputTokens + cacheTokens)) * 100).toFixed(1) : "0";
+
             return React.createElement(React.Fragment, null,
-              // ① 概览
-              React.createElement("div", { style: { padding: "10px 12px", background: "#f7f8fb", border: "1px solid #e6e8ef", borderRadius: 8, marginBottom: 12 } },
-                React.createElement("div", { style: { fontSize: 13, marginBottom: 4 } },
-                  "请求 ", React.createElement("b", null, fmtNum(overall.requests ?? 0)),
-                  " · 失败 ", React.createElement("b", { style: { color: usageNum(overall.errors) > 0 ? "#c0392b" : "inherit" } }, fmtNum(overall.errors ?? 0)),
-                  " · 合计 ", React.createElement("b", null, fmtNum(usageTotal(overall))), " tokens"),
-                React.createElement("div", { style: { fontSize: 12, color: "#666" } },
-                  `输入 ${fmtNum(overall.uncachedInputTokens)} · 缓存读 ${fmtNum(overall.cacheReadTokens)} · 输出 ${fmtNum(overall.outputTokens)}`),
-                React.createElement("div", { style: { fontSize: 11, color: "#999", marginTop: 2 } },
-                  `来源：池子 ${fmtNum(poolCount)} 行 / 直连 ${fmtNum(directCount)} 行` + (sourceFilter === "all" ? "" : ` · 当前只看${sourceFilter === "pool" ? "池子" : "直连"}`) + (typeof usage.days === "number" ? ` · 范围 ${usage.days} 天` : ""))
+              // ① 概览：现代 4 列 KPI 数据指标卡
+              React.createElement("div", {
+                style: {
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
+                  gap: 10,
+                  marginBottom: 16
+                }
+              },
+                // KPI 卡 1: 总请求与成功率
+                React.createElement("div", {
+                  style: {
+                    padding: "12px 14px",
+                    background: "var(--dsw-alias-bg-layer-1, #f8f9fa)",
+                    border: "1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.08))",
+                    borderRadius: 8
+                  }
+                },
+                  React.createElement("div", { style: { fontSize: 11, color: "var(--dsw-alias-label-secondary, #666)", marginBottom: 4 } }, "总调用次数 (Requests)"),
+                  React.createElement("div", { style: { fontSize: 20, fontWeight: 700, color: "var(--dsw-alias-label-primary, #111)", fontFamily: "monospace" } }, fmtNum(totalReqs)),
+                  React.createElement("div", { style: { fontSize: 11, color: totalErrors > 0 ? "var(--dsw-alias-state-error-primary, #cf222e)" : "var(--dsw-alias-state-success-primary, #1a7f37)", marginTop: 4 } },
+                    `成功率 ${successRate}% · 失败 ${fmtNum(totalErrors)} 次`)
+                ),
+                // KPI 卡 2: Token 消耗大盘
+                React.createElement("div", {
+                  style: {
+                    padding: "12px 14px",
+                    background: "var(--dsw-alias-bg-layer-1, #f8f9fa)",
+                    border: "1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.08))",
+                    borderRadius: 8
+                  }
+                },
+                  React.createElement("div", { style: { fontSize: 11, color: "var(--dsw-alias-label-secondary, #666)", marginBottom: 4 } }, "Token 总消耗 (Total Tokens)"),
+                  React.createElement("div", { style: { fontSize: 20, fontWeight: 700, color: "var(--dsw-alias-button-primary-fill, #4f46e5)", fontFamily: "monospace" }, title: fmtNum(totalTokens) + " tokens" }, fmtCompact(totalTokens)),
+                  React.createElement("div", { style: { fontSize: 11, color: "var(--dsw-alias-label-secondary, #666)", marginTop: 4 } },
+                    `未缓输入 ${fmtCompact(overall.uncachedInputTokens)} · 输出 ${fmtCompact(overall.outputTokens)}`)
+                ),
+                // KPI 卡 3: Prompt 缓存节省效应
+                React.createElement("div", {
+                  style: {
+                    padding: "12px 14px",
+                    background: "var(--dsw-alias-bg-layer-1, #f8f9fa)",
+                    border: "1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.08))",
+                    borderRadius: 8
+                  }
+                },
+                  React.createElement("div", { style: { fontSize: 11, color: "var(--dsw-alias-label-secondary, #666)", marginBottom: 4 } }, "Prompt 缓存读取 (Cache Read)"),
+                  React.createElement("div", { style: { fontSize: 20, fontWeight: 700, color: "var(--dsw-alias-state-success-primary, #1a7f37)", fontFamily: "monospace" }, title: fmtNum(cacheTokens) + " tokens" }, fmtCompact(cacheTokens)),
+                  React.createElement("div", { style: { fontSize: 11, color: "var(--dsw-alias-state-success-primary, #1a7f37)", marginTop: 4 } },
+                    `命中占输入 ${cachePercent}% · 大幅降低计费`)
+                ),
+                // KPI 卡 4: 统计口径与来源
+                React.createElement("div", {
+                  style: {
+                    padding: "12px 14px",
+                    background: "var(--dsw-alias-bg-layer-1, #f8f9fa)",
+                    border: "1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.08))",
+                    borderRadius: 8
+                  }
+                },
+                  React.createElement("div", { style: { fontSize: 11, color: "var(--dsw-alias-label-secondary, #666)", marginBottom: 4 } }, "数据范围与分布 (Scope)"),
+                  React.createElement("div", { style: { fontSize: 20, fontWeight: 700, color: "var(--dsw-alias-label-primary, #111)", fontFamily: "monospace" } },
+                    (typeof usage.days === "number" ? `${usage.days} 天` : `${days.length} 天`)),
+                  React.createElement("div", { style: { fontSize: 11, color: "var(--dsw-alias-label-secondary, #666)", marginTop: 4 } },
+                    `池子 ${fmtNum(poolCount)} 条 / 直连 ${fmtNum(directCount)} 条` + (sourceFilter === "all" ? "" : ` (${sourceFilter === "pool" ? "仅池子" : "仅直连"})`))
+                )
               ),
-              // ② 按模型
-              React.createElement("div", { style: { fontWeight: 600, marginBottom: 6 } }, "按模型"),
+
+              // ② 按模型明细表格
+              React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 } },
+                React.createElement("span", { style: { fontWeight: 600, fontSize: 13 } }, "📊 模型维度用量账单"),
+                React.createElement("span", { style: { fontSize: 11, color: "var(--dsw-alias-label-tertiary, #888)" } }, `共 ${modelRows.length} 个独立渠道模型`)
+              ),
               modelRows.length === 0
-                ? React.createElement("div", { style: { color: "#888", fontSize: 12, marginBottom: 12 } }, "这段时间没有记录")
-                : React.createElement("table", { style: styles.table },
-                    React.createElement("thead", null, React.createElement("tr", null,
-                      sortableTh("模型", "model"),
-                      React.createElement("th", { style: styles.th }, "来源"),
-                      sortableTh("请求", "requests"),
-                      sortableTh("失败", "errors"),
-                      sortableTh("输入(未缓存)", "uncachedInputTokens"),
-                      sortableTh("缓存读", "cacheReadTokens"),
-                      sortableTh("输出", "outputTokens"),
-                      sortableTh("合计", "total"))),
-                    React.createElement("tbody", null, modelRows.map((row) =>
-                      React.createElement("tr", { key: row.key },
-                        React.createElement("td", { style: styles.td },
-                          React.createElement("b", null, row.model),
-                          React.createElement("span", { style: { color: "#999", marginLeft: 6, fontSize: 11 } }, row.provider)),
-                        React.createElement("td", { style: styles.td },
-                          React.createElement("span", { style: { ...styles.badge, ...(row.source === "pool" ? styles.ok : styles.idle) } }, row.source === "pool" ? "池子" : "直连")),
-                        React.createElement("td", { style: styles.td }, fmtNum(row.requests)),
-                        React.createElement("td", { style: { ...styles.td, color: row.errors > 0 ? "#c0392b" : "#999" } }, row.source === "pool" ? fmtNum(row.errors) : "—"),
-                        React.createElement("td", { style: styles.td }, fmtNum(row.uncachedInputTokens)),
-                        React.createElement("td", { style: styles.td }, fmtNum(row.cacheReadTokens)),
-                        React.createElement("td", { style: styles.td }, fmtNum(row.outputTokens)),
-                        React.createElement("td", { style: { ...styles.td, fontWeight: 600 } }, fmtNum(usageTotal(row)))
-                      )))),
-              // ③ 逐日
-              React.createElement("div", { style: { fontWeight: 600, margin: "14px 0 6px" } }, "逐日"),
-              React.createElement("table", { style: styles.table },
-                React.createElement("thead", null, React.createElement("tr", null,
-                  ["日期", "请求", "失败", "输入(未缓存)", "缓存读", "输出", "合计", ""].map((h) =>
-                    React.createElement("th", { key: h, style: styles.th }, h)))),
-                React.createElement("tbody", null, days.map((day) => {
-                  const total = usageTotal(day);
-                  const width = maxDay > 0 ? Math.max(2, Math.round((total / maxDay) * 100)) : 0;
-                  return React.createElement("tr", { key: day.day },
-                    React.createElement("td", { style: styles.td }, day.day),
-                    React.createElement("td", { style: styles.td }, fmtNum(day.requests)),
-                    React.createElement("td", { style: { ...styles.td, color: usageNum(day.errors) > 0 ? "#c0392b" : "#999" } }, fmtNum(day.errors)),
-                    React.createElement("td", { style: styles.td }, fmtNum(day.uncachedInputTokens)),
-                    React.createElement("td", { style: styles.td }, fmtNum(day.cacheReadTokens)),
-                    React.createElement("td", { style: styles.td }, fmtNum(day.outputTokens)),
-                    React.createElement("td", { style: { ...styles.td, fontWeight: 600 } }, fmtNum(total)),
-                    React.createElement("td", { style: { ...styles.td, width: 140 } },
-                      React.createElement("div", { style: { height: 6, background: "#eee", borderRadius: 3 } },
-                        React.createElement("div", { style: { height: 6, width: `${width}%`, background: "#4f46e5", borderRadius: 3 } })))
-                  );
-                }))
+                ? React.createElement("div", { style: { color: "var(--dsw-alias-label-tertiary, #888)", fontSize: 12, marginBottom: 16, padding: "12px 0" } }, "这段时间没有记录")
+                : React.createElement("div", { style: { border: "1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.08))", borderRadius: 6, overflow: "hidden", marginBottom: 16, background: "var(--dsw-alias-bg-layer-1, #fff)" } },
+                    React.createElement("table", { style: styles.table },
+                      React.createElement("thead", null, React.createElement("tr", null,
+                        sortableTh("模型", "model"),
+                        React.createElement("th", { style: { ...styles.th, width: 70 } }, "来源"),
+                        sortableTh("请求", "requests", { textAlign: "right" }),
+                        sortableTh("失败", "errors", { textAlign: "right" }),
+                        sortableTh("输入(未缓存)", "uncachedInputTokens", { textAlign: "right" }),
+                        sortableTh("缓存读", "cacheReadTokens", { textAlign: "right" }),
+                        sortableTh("输出", "outputTokens", { textAlign: "right" }),
+                        sortableTh("合计", "total", { textAlign: "right" }))),
+                      React.createElement("tbody", null, modelRows.map((row) =>
+                        React.createElement("tr", { key: row.key, style: { borderBottom: "1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.06))" } },
+                          React.createElement("td", { style: styles.td },
+                            React.createElement("b", { style: { fontSize: 12 } }, row.model),
+                            React.createElement("span", { style: { color: "var(--dsw-alias-label-tertiary, #888)", marginLeft: 6, fontSize: 11 } }, row.provider)),
+                          React.createElement("td", { style: styles.td },
+                            React.createElement("span", { style: { ...styles.badge, ...(row.source === "pool" ? styles.ok : styles.idle) } }, row.source === "pool" ? "池子" : "直连")),
+                          React.createElement("td", { style: { ...styles.td, textAlign: "right", fontFamily: "monospace" } }, fmtNum(row.requests)),
+                          React.createElement("td", { style: { ...styles.td, textAlign: "right", fontFamily: "monospace", color: row.errors > 0 ? "var(--dsw-alias-state-error-primary, #cf222e)" : "var(--dsw-alias-label-tertiary, #999)" } }, row.source === "pool" ? fmtNum(row.errors) : "—"),
+                          React.createElement("td", { style: { ...styles.td, textAlign: "right", fontFamily: "monospace" } }, fmtNum(row.uncachedInputTokens)),
+                          React.createElement("td", { style: { ...styles.td, textAlign: "right", fontFamily: "monospace", color: "var(--dsw-alias-state-success-primary, #1a7f37)" } }, fmtNum(row.cacheReadTokens)),
+                          React.createElement("td", { style: { ...styles.td, textAlign: "right", fontFamily: "monospace" } }, fmtNum(row.outputTokens)),
+                          React.createElement("td", { style: { ...styles.td, textAlign: "right", fontFamily: "monospace", fontWeight: 600, color: "var(--dsw-alias-button-primary-fill, #4f46e5)" } }, fmtNum(usageTotal(row)))
+                        ))))),
+
+              // ③ 逐日趋势表格（带现代比例柱状条）
+              React.createElement("div", { style: { fontWeight: 600, fontSize: 13, margin: "16px 0 8px" } }, "📅 逐日消耗走势"),
+              React.createElement("div", { style: { border: "1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.08))", borderRadius: 6, overflow: "hidden", marginBottom: 16, background: "var(--dsw-alias-bg-layer-1, #fff)" } },
+                React.createElement("table", { style: styles.table },
+                  React.createElement("thead", null, React.createElement("tr", null,
+                    ["日期", "请求", "失败", "输入(未缓存)", "缓存读", "输出", "合计", "相对占比"].map((h, hi) =>
+                      React.createElement("th", { key: h, style: { ...styles.th, ...(hi >= 1 && hi <= 6 ? { textAlign: "right" } : {}) } }, h)))),
+                  React.createElement("tbody", null, days.map((day) => {
+                    const total = usageTotal(day);
+                    const width = maxDay > 0 ? Math.max(2, Math.round((total / maxDay) * 100)) : 0;
+                    return React.createElement("tr", { key: day.day, style: { borderBottom: "1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.06))" } },
+                      React.createElement("td", { style: { ...styles.td, fontWeight: 500 } }, day.day),
+                      React.createElement("td", { style: { ...styles.td, textAlign: "right", fontFamily: "monospace" } }, fmtNum(day.requests)),
+                      React.createElement("td", { style: { ...styles.td, textAlign: "right", fontFamily: "monospace", color: usageNum(day.errors) > 0 ? "var(--dsw-alias-state-error-primary, #cf222e)" : "var(--dsw-alias-label-tertiary, #999)" } }, fmtNum(day.errors)),
+                      React.createElement("td", { style: { ...styles.td, textAlign: "right", fontFamily: "monospace" } }, fmtNum(day.uncachedInputTokens)),
+                      React.createElement("td", { style: { ...styles.td, textAlign: "right", fontFamily: "monospace", color: "var(--dsw-alias-state-success-primary, #1a7f37)" } }, fmtNum(day.cacheReadTokens)),
+                      React.createElement("td", { style: { ...styles.td, textAlign: "right", fontFamily: "monospace" } }, fmtNum(day.outputTokens)),
+                      React.createElement("td", { style: { ...styles.td, textAlign: "right", fontFamily: "monospace", fontWeight: 600 } }, fmtNum(total)),
+                      React.createElement("td", { style: { ...styles.td, width: 140 } },
+                        React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6 } },
+                          React.createElement("div", { style: { flex: 1, height: 6, background: "var(--dsw-alias-bg-layer-2, rgba(0,0,0,0.06))", borderRadius: 3, overflow: "hidden" } },
+                            React.createElement("div", { style: { height: 6, width: `${width}%`, background: "linear-gradient(90deg, var(--dsw-alias-button-primary-fill, #4f46e5), #818cf8)", borderRadius: 3 } })),
+                          React.createElement("span", { style: { fontSize: 10, color: "var(--dsw-alias-label-tertiary, #888)", width: 28, textAlign: "right" } }, `${width}%`)
+                        )
+                      )
+                    );
+                  }))
+                )
               ),
-              // ④ 对账
-              React.createElement("div", { style: { marginTop: 14, paddingTop: 8, borderTop: "1px solid #eee", fontSize: 11, color: "#888", lineHeight: 1.7 } },
-                `数据覆盖（不受筛选影响）：池子 ${fmtCompact(usage.reconcile?.poolTokens ?? 0)} + 直连 ${fmtCompact(usage.reconcile?.directTokens ?? 0)} = ${fmtCompact((usage.reconcile?.poolTokens ?? 0) + (usage.reconcile?.directTokens ?? 0))} tokens`,
-                React.createElement("br"),
-                `回放：扫 ${fmtNum(replay.files)} 个会话文件 · 解析 ${fmtNum(replay.parsed)} · 跳过 ${fmtNum(replay.skipped)}（不在范围内）· 失败 ${fmtNum(replay.failed)} · 记录 ${fmtNum(replay.records)} 条 · 耗时 ${fmtNum(replay.tookMs)}ms`
+
+              // ④ 对账底栏（优雅收拢为卡片注脚）
+              React.createElement("div", {
+                style: {
+                  padding: "10px 14px",
+                  borderRadius: 6,
+                  background: "var(--dsw-alias-bg-layer-1, rgba(0,0,0,0.02))",
+                  border: "1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.06))",
+                  fontSize: 11,
+                  color: "var(--dsw-alias-label-tertiary, #888)",
+                  lineHeight: 1.7
+                }
+              },
+                React.createElement("div", { style: { fontWeight: 500, color: "var(--dsw-alias-label-secondary, #666)" } },
+                  `数据覆盖（不受筛选影响）：池子 ${fmtCompact(usage.reconcile?.poolTokens ?? 0)} + 直连 ${fmtCompact(usage.reconcile?.directTokens ?? 0)} = ${fmtCompact((usage.reconcile?.poolTokens ?? 0) + (usage.reconcile?.directTokens ?? 0))} tokens`
+                ),
+                React.createElement("div", null,
+                  `回放：扫 ${fmtNum(replay.files)} 个会话文件 · 解析 ${fmtNum(replay.parsed)} · 跳过 ${fmtNum(replay.skipped)}（不在范围内）· 失败 ${fmtNum(replay.failed)} · 记录 ${fmtNum(replay.records)} 条 · 耗时 ${fmtNum(replay.tookMs)}ms`
+                )
               )
             );
           })()
-    );
-    //#endregion
+    );    //#endregion
 
     const tabBar = React.createElement("div", { style: styles.tabs },
       React.createElement("button", { style: { ...styles.tabBtn, ...(tab === "models" ? styles.tabBtnActive : {}) }, onClick: () => setTab("models") }, "模型列表"),
@@ -1069,12 +1159,32 @@
 
     const disabledProviders = Object.keys((state && state.disabledProviders) || {});
     const disabledStrip = disabledProviders.length === 0 ? null : React.createElement("div", {
-      style: { marginBottom: 10, padding: "8px 10px", background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: 8, fontSize: 12, display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }
+      style: {
+        marginBottom: 12,
+        padding: "10px 14px",
+        background: "rgba(234, 88, 12, 0.08)",
+        border: "1px solid rgba(234, 88, 12, 0.25)",
+        borderRadius: 8,
+        fontSize: 12,
+        display: "flex",
+        flexWrap: "wrap",
+        gap: 8,
+        alignItems: "center"
+      }
     },
-      React.createElement("span", { style: { color: "#9a3412", fontWeight: 600 } }, `已禁用 ${disabledProviders.length} 个供应商（不出现在对话的模型列表）`),
+      React.createElement("span", { style: { color: "#c2410c", fontWeight: 600 } }, `已禁用 ${disabledProviders.length} 个供应商（不出现在对话的模型列表）`),
       ...disabledProviders.map((p) => React.createElement("span", {
         key: p,
-        style: { display: "inline-flex", alignItems: "center", gap: 6, background: "#fff", border: "1px solid #fed7aa", borderRadius: 999, padding: "2px 8px" }
+        style: {
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 6,
+          background: "var(--dsw-alias-bg-layer-1, #fff)",
+          border: "1px solid rgba(234, 88, 12, 0.3)",
+          color: "var(--dsw-alias-label-primary, #111)",
+          borderRadius: 999,
+          padding: "2px 8px"
+        }
       },
         p,
         React.createElement("button", { style: { ...styles.btn, height: 22, padding: "0 8px", fontSize: 11 }, onClick: () => toggleProvider(p, true) }, "启用")
@@ -1083,6 +1193,7 @@
 
     const modelsPane = React.createElement("div", null,
       disabledStrip,
+      // 顶部操作栏
       React.createElement("div", { style: styles.toolbar },
         React.createElement("button", { style: { ...styles.btn, ...styles.btnPrimary }, onClick: () => loadModels(true), disabled: refreshing }, refreshing ? "刷新中…" : "刷新目录"),
         React.createElement("button", { style: styles.btn, onClick: testAll, disabled: busy }, busy ? "测试中…" : "测试全部"),
@@ -1094,110 +1205,201 @@
           "显示未注册"
         )
       ),
-      React.createElement("div", { style: { fontSize: 12, color: "#888", margin: "4px 0 10px", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" } },
-        React.createElement("span", null, q || hasFilters ? `匹配 ${filtered.length} / 共 ${models.length} 个模型` : `共 ${models.length} 个模型`),
+      // 统计与筛选激活标记
+      React.createElement("div", { style: { fontSize: 12, color: "var(--dsw-alias-label-secondary, #666)", margin: "4px 0 12px", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" } },
+        React.createElement("span", { style: { fontWeight: 500 } }, q || hasFilters ? `匹配 ${filtered.length} / 共 ${models.length} 个模型` : `共 ${models.length} 个模型`),
         // 把"筛了什么"写在明面上：否则「怎么只有 12 个模型」永远没有答案
         ...Object.entries(columnFilters).filter(([, v]) => v !== null).map(([col, v]) =>
-          React.createElement("span", { key: col, style: { padding: "1px 8px", borderRadius: 10, fontSize: 11, background: "#eef2ff", color: "#4f46e5" } }, `${COLUMN_LABEL[col]} · ${valueLabel(col, v)}`)),
-        sortBy.key !== null && React.createElement("span", { style: { padding: "1px 8px", borderRadius: 10, fontSize: 11, background: "#f4f4f5", color: "#52525b" } }, `排序 ${COLUMN_LABEL[sortBy.key]} ${sortBy.desc ? "↓" : "↑"}`),
-        hasFilters && React.createElement("button", { style: { ...styles.btn, height: 20, padding: "0 8px", fontSize: 11 }, onClick: clearAll }, "清除全部"),
+          React.createElement("span", {
+            key: col,
+            style: {
+              padding: "2px 8px",
+              borderRadius: 4,
+              fontSize: 11,
+              background: "var(--dsw-alias-brand-light, rgba(79, 70, 229, 0.1))",
+              border: "1px solid rgba(79, 70, 229, 0.2)",
+              color: "var(--dsw-alias-button-primary-fill, #4f46e5)",
+              fontWeight: 500
+            }
+          }, `${COLUMN_LABEL[col]} · ${valueLabel(col, v)}`)),
+        sortBy.key !== null && React.createElement("span", {
+          style: {
+            padding: "2px 8px",
+            borderRadius: 4,
+            fontSize: 11,
+            background: "var(--dsw-alias-bg-layer-2, rgba(0,0,0,0.04))",
+            border: "1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.08))",
+            color: "var(--dsw-alias-label-secondary, #52525b)"
+          }
+        }, `排序 ${COLUMN_LABEL[sortBy.key]} ${sortBy.desc ? "↓" : "↑"}`),
+        hasFilters && React.createElement("button", { style: { ...styles.btn, height: 22, padding: "0 8px", fontSize: 11 }, onClick: clearAll }, "清除全部"),
         notice && React.createElement("span", { style: { ...styles.notice, ...(notice.type === "ok" ? styles.noticeOk : styles.noticeErr) } }, notice.text),
-        lastTestAt && React.createElement("span", { style: { fontSize: 12, color: "#999" }, title: new Date(lastTestAt).toLocaleString() },
+        lastTestAt && React.createElement("span", { style: { fontSize: 12, color: "var(--dsw-alias-label-tertiary, #999)", marginLeft: "auto" }, title: new Date(lastTestAt).toLocaleString() },
           `上次测试 ${new Date(lastTestAt).toLocaleTimeString()}`)
       ),
-      React.createElement("div", { style: { maxHeight: "calc(100vh - 230px)", overflowY: "auto", border: "1px solid #f0f0f0", borderRadius: 8 } },
-      React.createElement("table", { style: styles.table },
-        React.createElement("thead", null, React.createElement("tr", null,
-          React.createElement("th", { style: styles.th }, "选"),
-          filterHeader("provider"),
-          React.createElement("th", { style: styles.th }, "模型"),
-          filterHeader("family"),
-          filterHeader("free"),
-          filterHeader("status"),
-          React.createElement("th", { style: styles.th }, "操作")
-        )),
-        React.createElement("tbody", null, groupKeys.flatMap((provider) => {
-          const rows = groups[provider];
-          const isCol = collapsed[provider] !== false;
-          const selCount = rows.filter((r) => checked[r.key]).length;
-          const canPull = rows[0].api === "openai-completions" || rows[0].api === "deepseek";
-          const headRow = React.createElement("tr", {
-            key: "g:" + provider,
-            onClick: () => setCollapsed((p) => ({ ...p, [provider]: p[provider] === false ? true : false })),
-            style: { cursor: "pointer", background: "var(--dsw-alias-bg-layer-2, #f7f7f9)", fontWeight: 600, userSelect: "none" }
-          }, React.createElement("td", { colSpan: 7 },
-            (isCol ? "▶ " : "▼ ") + rows[0].displayName + `（${rows.length} 个模型` + (selCount ? `，已选 ${selCount}` : "") + "）",
-            React.createElement("button", {
-              style: { ...styles.btn, marginLeft: 8, padding: "0 8px", fontWeight: 400, ...(providerTesting[provider] !== void 0 ? { color: "#4f46e5" } : {}) },
-              title: "测试该供应商的全部模型（不受搜索/筛选影响）",
-              disabled: providerTesting[provider] !== void 0,
-              onClick: (e) => { e.stopPropagation(); void testProvider(provider); }
-            }, providerTesting[provider] !== void 0
-              ? `测中 ${providerTesting[provider].done}/${providerTesting[provider].total}`
-              : `测全部 ${rows.length}`),
-            canPull ? React.createElement("button", {
-              style: { ...styles.btn, marginLeft: 8, padding: "0 8px", fontWeight: 400 },
-              title: "拉取该供应商上游 /v1/models 全目录，勾选后写回 DSH 配置",
-              disabled: upstreamBusy === provider,
-              onClick: (e) => { e.stopPropagation(); pullUpstream(provider); }
-            }, upstreamBusy === provider ? "拉取中…" : "拉上游") : null,
-            canPull ? React.createElement("button", {
-              style: { ...styles.btn, marginLeft: 6, padding: "0 8px", fontWeight: 400, color: "#9a3412" },
-              title: "从 DSH 的模型选择列表里隐藏该供应商（配置会暂存，可恢复）",
-              onClick: (e) => { e.stopPropagation(); toggleProvider(provider, false); }
-            }, "禁用") : null
-          ));
-          const panel = upstream[provider] ? upstreamPanel(provider) : null;
-          if (isCol) return panel ? [headRow, panel] : [headRow];
-          // 每组默认只列前 20 个（330 个模型全渲染会卡），但必须给出口：
-          // 原来 `rows.slice(0, 20)` 后面什么都没有，trae(31)/workbuddy-ai(28)/workbuddy4(26)
-          // 有 25 个模型在面板里根本勾不到。
-          const showAll = autoExpand || expanded[provider] === true;
-          const shown = showAll ? rows : rows.slice(0, 20);
-          const out = [headRow, ...(panel ? [panel] : []), ...shown.map((m) => {
-            const unavailable = m.registered === false;
-            return React.createElement("tr", { key: m.key, style: { opacity: unavailable ? 0.45 : 1 } },
-              React.createElement("td", { style: styles.td }, React.createElement("input", { type: "checkbox", disabled: unavailable, checked: !!checked[m.key], onChange: () => setChecked((p) => ({ ...p, [m.key]: !p[m.key] })) })),
-              React.createElement("td", { style: styles.td }, m.displayName),
-              React.createElement("td", { style: styles.td, title: m.modelId }, m.modelName || m.modelId),
-              React.createElement("td", { style: styles.td }, familyOf(m.modelName || m.modelId)),
-              React.createElement("td", { style: styles.td }, m.free ? "是" : m.configured ? "—" : "?"),
-              React.createElement("td", { style: styles.td }, badge(m.key)),
-              React.createElement("td", { style: styles.td }, unavailable ? "未注册" : React.createElement(React.Fragment, null,
-                React.createElement("button", {
-                  style: styles.btn,
-                  disabled: testing[m.key] === true,
-                  onClick: () => void testOne(m.key)
-                }, testing[m.key] === true ? "测中…" : "测"),
-                // 结果贴在按钮右边：原来只改「状态」列，行一长就看不见
-                (() => {
-                  if (testing[m.key] === true) return null;
-                  const r = results[m.key];
-                  if (!r) return null;
-                  return r.status === "ok"
-                    ? React.createElement("span", { style: { marginLeft: 6, fontSize: 11, color: "#1a7f37" } }, `${r.latency}ms`)
-                    : React.createElement("span", { style: { marginLeft: 6, fontSize: 11, color: "#c0392b" }, title: r.error || "" }, "失败");
-                })()
-              ))
-            );
-          })];
-          if (rows.length > 20) {
-            out.push(React.createElement("tr", { key: "more:" + provider },
-              React.createElement("td", { colSpan: 7, style: { ...styles.td, textAlign: "center" } },
-                autoExpand
-                  ? React.createElement("span", { style: { fontSize: 12, color: "#999" } }, `已展开全部 ${rows.length} 个（筛选状态）`)
-                  : React.createElement("button", {
-                      style: styles.btn,
-                      onClick: () => setExpanded((p) => ({ ...p, [provider]: !showAll }))
-                    }, showAll ? "收起，只看前 20 个" : `展开剩余 ${rows.length - 20} 个（共 ${rows.length}）`)
+      // 模型表格容器
+      React.createElement("div", {
+        style: {
+          maxHeight: "calc(100vh - 230px)",
+          overflowY: "auto",
+          border: "1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.08))",
+          borderRadius: 8,
+          background: "var(--dsw-alias-bg-layer-1, #fff)"
+        }
+      },
+        React.createElement("table", { style: styles.table },
+          React.createElement("thead", null, React.createElement("tr", null,
+            React.createElement("th", { style: { ...styles.th, width: 36, textAlign: "center" } }, "选"),
+            filterHeader("provider"),
+            React.createElement("th", { style: styles.th }, "模型"),
+            filterHeader("family"),
+            filterHeader("free"),
+            filterHeader("status"),
+            React.createElement("th", { style: { ...styles.th, width: 90 } }, "操作")
+          )),
+          React.createElement("tbody", null, groupKeys.flatMap((provider) => {
+            const rows = groups[provider];
+            const isCol = collapsed[provider] !== false;
+            const selCount = rows.filter((r) => checked[r.key]).length;
+            const canPull = rows[0].api === "openai-completions" || rows[0].api === "deepseek";
+            const headRow = React.createElement("tr", {
+              key: "g:" + provider,
+              onClick: () => setCollapsed((p) => ({ ...p, [provider]: p[provider] === false ? true : false })),
+              style: {
+                cursor: "pointer",
+                background: "var(--dsw-alias-bg-layer-2, #f7f7f9)",
+                fontWeight: 600,
+                userSelect: "none",
+                borderBottom: "1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.08))"
+              }
+            }, React.createElement("td", { colSpan: 7, style: { padding: "8px 12px" } },
+              React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 } },
+                React.createElement("div", { style: { display: "inline-flex", alignItems: "center", gap: 6 } },
+                  React.createElement("span", { style: { fontSize: 11, color: "var(--dsw-alias-label-tertiary, #999)" } }, isCol ? "▶" : "▼"),
+                  React.createElement("span", { style: { fontSize: 13 } }, rows[0].displayName),
+                  React.createElement("span", {
+                    style: {
+                      fontSize: 11,
+                      padding: "1px 6px",
+                      borderRadius: 10,
+                      background: "var(--dsw-alias-bg-layer-1, rgba(0,0,0,0.04))",
+                      border: "1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.08))",
+                      color: "var(--dsw-alias-label-secondary, #666)"
+                    }
+                  }, `${rows.length} 个模型`),
+                  selCount > 0 && React.createElement("span", {
+                    style: {
+                      fontSize: 11,
+                      padding: "1px 6px",
+                      borderRadius: 10,
+                      background: "var(--dsw-alias-brand-light, rgba(79, 70, 229, 0.1))",
+                      color: "var(--dsw-alias-button-primary-fill, #4f46e5)",
+                      fontWeight: 600
+                    }
+                  }, `已选 ${selCount}`)
+                ),
+                React.createElement("div", { style: { display: "inline-flex", alignItems: "center", gap: 6 } },
+                  React.createElement("button", {
+                    style: { ...styles.btn, height: 22, padding: "0 8px", fontSize: 11, fontWeight: 400, ...(providerTesting[provider] !== void 0 ? { color: "#4f46e5" } : {}) },
+                    title: "测试该供应商的全部模型（不受搜索/筛选影响）",
+                    disabled: providerTesting[provider] !== void 0,
+                    onClick: (e) => { e.stopPropagation(); void testProvider(provider); }
+                  }, providerTesting[provider] !== void 0
+                    ? `测中 ${providerTesting[provider].done}/${providerTesting[provider].total}`
+                    : `测全部 ${rows.length}`),
+                  canPull ? React.createElement("button", {
+                    style: { ...styles.btn, height: 22, padding: "0 8px", fontSize: 11, fontWeight: 400 },
+                    title: "拉取该供应商上游 /v1/models 全目录，勾选后写回 DSH 配置",
+                    disabled: upstreamBusy === provider,
+                    onClick: (e) => { e.stopPropagation(); pullUpstream(provider); }
+                  }, upstreamBusy === provider ? "拉取中…" : "拉上游") : null,
+                  canPull ? React.createElement("button", {
+                    style: { ...styles.btn, height: 22, padding: "0 8px", fontSize: 11, fontWeight: 400, color: "var(--dsw-alias-state-error-primary, #cf222e)" },
+                    title: "从 DSH 的模型选择列表里隐藏该供应商（配置会暂存，可恢复）",
+                    onClick: (e) => { e.stopPropagation(); toggleProvider(provider, false); }
+                  }, "禁用") : null
+                )
               )
             ));
-          }
-          return out;
-        }))
+            const panel = upstream[provider] ? upstreamPanel(provider) : null;
+            if (isCol) return panel ? [headRow, panel] : [headRow];
+            const showAll = autoExpand || expanded[provider] === true;
+            const shown = showAll ? rows : rows.slice(0, 20);
+            const out = [headRow, ...(panel ? [panel] : []), ...shown.map((m) => {
+              const unavailable = m.registered === false;
+              const hasVision = /vision|vl|-v\b|4o|gemini|claude|omni|pixtral|minicpm-v|internvl|qwen.*max|qwen.*plus|glm-4v|glm-5/i.test(m.modelId) && !/coder|code/i.test(m.modelId);
+              const isReasoning = /reasoner|r1|o1|o3|thinking|thought/i.test(m.modelId);
+              return React.createElement("tr", {
+                key: m.key,
+                style: {
+                  opacity: unavailable ? 0.45 : 1,
+                  borderBottom: "1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.06))",
+                  transition: "background 0.12s"
+                }
+              },
+                React.createElement("td", { style: { ...styles.td, textAlign: "center" } },
+                  React.createElement("input", { type: "checkbox", disabled: unavailable, checked: !!checked[m.key], onChange: () => setChecked((p) => ({ ...p, [m.key]: !p[m.key] })) })),
+                React.createElement("td", { style: { ...styles.td, color: "var(--dsw-alias-label-secondary, #555)" } }, m.displayName),
+                React.createElement("td", { style: styles.td, title: m.modelId },
+                  React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } },
+                    React.createElement("b", { style: { fontSize: 12 } }, m.modelName || m.modelId),
+                    hasVision && React.createElement("span", {
+                      style: { padding: "1px 4px", borderRadius: 3, fontSize: 10, background: "rgba(14, 165, 233, 0.12)", color: "#0284c7" },
+                      title: "多模态视觉模型"
+                    }, "🖼️ VL"),
+                    isReasoning && React.createElement("span", {
+                      style: { padding: "1px 4px", borderRadius: 3, fontSize: 10, background: "rgba(99, 102, 241, 0.12)", color: "#4f46e5" },
+                      title: "深度思考/推理模型"
+                    }, "🧠 思考")
+                  ),
+                  m.modelName && m.modelName !== m.modelId && React.createElement("div", { style: { fontSize: 10, color: "var(--dsw-alias-label-tertiary, #888)", fontFamily: "monospace" } }, m.modelId)
+                ),
+                React.createElement("td", { style: { ...styles.td, color: "var(--dsw-alias-label-secondary, #555)" } }, familyOf(m.modelName || m.modelId)),
+                React.createElement("td", { style: styles.td },
+                  React.createElement("span", {
+                    style: {
+                      fontSize: 11,
+                      fontWeight: m.free ? 600 : 400,
+                      color: m.free ? "var(--dsw-alias-state-success-primary, #1a7f37)" : "inherit"
+                    }
+                  }, m.free ? "是" : m.configured ? "—" : "?")
+                ),
+                React.createElement("td", { style: styles.td }, badge(m.key)),
+                React.createElement("td", { style: styles.td }, unavailable ? "未注册" : React.createElement(React.Fragment, null,
+                  React.createElement("button", {
+                    style: { ...styles.btn, height: 22, padding: "0 8px", fontSize: 11 },
+                    disabled: testing[m.key] === true,
+                    onClick: () => void testOne(m.key)
+                  }, testing[m.key] === true ? "测中…" : "测"),
+                  // 结果贴在按钮右边：原来只改「状态」列，行一长就看不见
+                  (() => {
+                    if (testing[m.key] === true) return null;
+                    const r = results[m.key];
+                    if (!r) return null;
+                    return r.status === "ok"
+                      ? React.createElement("span", { style: { marginLeft: 6, fontSize: 11, color: "var(--dsw-alias-state-success-primary, #1a7f37)" } }, `${r.latency}ms`)
+                      : React.createElement("span", { style: { marginLeft: 6, fontSize: 11, color: "var(--dsw-alias-state-error-primary, #cf222e)" }, title: r.error || "" }, "失败");
+                  })()
+                ))
+              );
+            })];
+            if (rows.length > 20) {
+              out.push(React.createElement("tr", { key: "more:" + provider },
+                React.createElement("td", { colSpan: 7, style: { ...styles.td, textAlign: "center", padding: "10px 0" } },
+                  autoExpand
+                    ? React.createElement("span", { style: { fontSize: 12, color: "var(--dsw-alias-label-tertiary, #999)" } }, `已展开全部 ${rows.length} 个（筛选状态）`)
+                    : React.createElement("button", {
+                        style: styles.btn,
+                        onClick: () => setExpanded((p) => ({ ...p, [provider]: !showAll }))
+                      }, showAll ? "收起，只看前 20 个" : `展开剩余 ${rows.length - 20} 个（共 ${rows.length}）`)
+                )
+              ));
+            }
+            return out;
+          }))
+        )
       ),
-      ),
-      filtered.length === 0 && React.createElement("div", { style: { padding: "22px 12px", textAlign: "center", fontSize: 12, color: "#888" } },
+      filtered.length === 0 && React.createElement("div", { style: { padding: "24px 12px", textAlign: "center", fontSize: 12, color: "var(--dsw-alias-label-tertiary, #888)" } },
         "没有符合条件的模型 ",
         React.createElement("button", { style: { ...styles.btn, marginLeft: 8, height: 22, padding: "0 8px", fontSize: 11 }, onClick: clearAll }, "清除筛选")),
       filterPanel()
