@@ -865,10 +865,12 @@ function describeFailure(fail, prefix) {
 
 
 class PoolAdapter {
-  constructor(readStateFn, getLlm) {
+  constructor(readStateFn, getLlm, onLastUse) {
     this.readState = readStateFn;
     this.getLlm = getLlm;
+    this.onLastUse = typeof onLastUse === "function" ? onLastUse : null;
     this.cooldown = new Map(); // selector -> untilMs
+    this.failureStreaks = new Map(); // entry -> 连续失败次数
     this.lastUse = null;       // 最近一次成功命中 {scheme,provider,model,entry,at,attempts}
     this.attempts = [];        // 最近一次调用的逐条尝试记录
     this.registered = new Set(); // 宿主当前已注册 adapter 的 provider id 缓存；空=未知，不硬过滤
@@ -884,6 +886,32 @@ class PoolAdapter {
     const raw = Number(this.readState()?.cooldownMs);
     if (!Number.isFinite(raw) || raw <= 0) return 60 * 1000;
     return Math.min(Math.max(raw, 5 * 1000), 3600 * 1000);
+  }
+  /**
+   * 指数退避上限：默认 500 秒（`state.maxBackoffMs` 可配），下限 10 秒，上限 1 小时。
+   */
+  _maxBackoffMs() {
+    const raw = Number(this.readState()?.maxBackoffMs);
+    if (!Number.isFinite(raw) || raw <= 0) return 500 * 1000;
+    return Math.min(Math.max(raw, 10 * 1000), 3600 * 1000);
+  }
+  /**
+   * 记录失败并按指数退避计算冷却时长：
+   * 第 1 次失败冷却 baseMs（默认 60s）；
+   * 第 2 次失败 2 * baseMs（120s）；
+   * 第 3 次失败 4 * baseMs（240s）...
+   * 上限限制在 maxBackoffMs（默认 500s）。
+   */
+  _recordFailure(entry, now) {
+    const streak = (this.failureStreaks.get(entry) || 0) + 1;
+    this.failureStreaks.set(entry, streak);
+    const baseMs = this._cooldownMs();
+    const maxBackoffMs = this._maxBackoffMs();
+    const factor = Math.pow(2, streak - 1);
+    const cooldownMs = Math.min(baseMs * factor, Math.max(baseMs, maxBackoffMs));
+    this.cooldown.set(entry, now + cooldownMs);
+    __poolDiag(`[stream] 候选 ${entry} 连续失败第 ${streak} 次，退避冷却 ${Math.round(cooldownMs / 1000)}s（基准 ${Math.round(baseMs / 1000)}s，上限 ${Math.round(maxBackoffMs / 1000)}s）`);
+    return cooldownMs;
   }
   providerInfo(provider) { return { id: provider, name: "ModelPool" }; }
   // 虚拟模型 id 即方案名；Auto 跟随当前激活方案
@@ -1051,13 +1079,15 @@ class PoolAdapter {
         }
       }
       if (usedVariant !== null) {
+        this.failureStreaks.delete(c.entry);
+        this.cooldown.delete(c.entry);
         return; // 任一变体成功，整条链路结束
       }
       // 全部变体都失败
       lastError = variantErr;
       attempt.error = variantErr?.message || String(variantErr);
       __poolDiag(`[stream] 候选 ${c.entry} 失败: ${variantErr?.message}\n${variantErr?.stack || ""}`);
-      this.cooldown.set(c.entry, now + this._cooldownMs()); // 发起级失败：按配置冷却，到期回到链头
+      this._recordFailure(c.entry, now); // 发起级失败：指数退避冷却，到期回到链头
       continue;
     }
     __poolDiag(`[stream] 全部候选失败 lastError=${lastError?.message}`);
@@ -1107,7 +1137,7 @@ class PoolAdapter {
         attempt.midStream = true;
         attempt.error = describeFailure(fail, `${c.entry} 中途失败`);
         if (this.lastUse && this.lastUse.entry === c.entry) this.lastUse.midStreamError = attempt.error;
-        this.cooldown.set(c.entry, now + this._cooldownMs());
+        this._recordFailure(c.entry, now);
         yield chunk;
         return;
       }
@@ -1122,11 +1152,17 @@ class PoolAdapter {
           at: now,
           attempts: this.attempts.length
         };
+        // 落盘（2026-11-05）：lastUse 原来只在内存里，插件一重载就清空，
+        // 输入框的「当前渠道」要等到下一次成功对话才回来。写独立小文件而不是
+        // 塞进 model-pool.json —— 后者是用户配置，写它既怕覆盖也怕轮询读到半份。
+        if (this.onLastUse) { try { this.onLastUse(this.lastUse); } catch { /* 落盘失败不影响对话 */ } }
       }
       yield chunk;
       cur = await it.next();
     }
     if (!seen) throw new Error(`${c.entry} 返回空流（无可见正文）`);
+    this.failureStreaks.delete(c.entry);
+    this.cooldown.delete(c.entry);
     } catch (error) {
       throw error;
     } finally {
@@ -1160,12 +1196,19 @@ class PoolAdapter {
   }
   // 供面板读取：最近命中 + 本次尝试 + 冷却中条目
   status() {
+    const maxBackoffMs = this._maxBackoffMs();
     return {
       lastUse: this.lastUse,
       attempts: this.attempts,
       cooldownMs: this._cooldownMs(),
+      maxBackoffMs,
       cooling: [...this.cooldown.entries()]
-        .map(([entry, until]) => ({ entry, until, remainingMs: Math.max(0, until - Date.now()) }))
+        .map(([entry, until]) => ({
+          entry,
+          until,
+          remainingMs: Math.max(0, until - Date.now()),
+          streak: this.failureStreaks.get(entry) || 1
+        }))
         .filter((x) => x.remainingMs > 0)
     };
   }
@@ -1232,7 +1275,17 @@ function apply(ctx) {
   const logger = ctx.logger ? ctx.logger("dsh-model-pool") : console;
 
   // 虚拟 provider 接管（llm 可选获取，注册失败不阻断面板与探测）
-  const adapter = new PoolAdapter(() => readState(profile), () => llm);
+  // lastUse 落盘（2026-11-05）：独立文件，避免与用户配置互相覆盖。
+  const lastUsePath = join(profile?.dir || dshHome(), "model-pool-lastuse.json");
+  const persistLastUse = (lu) => {
+    try { writeFileSync(lastUsePath, JSON.stringify({ lastUse: lu }, null, 2), "utf8"); } catch { /* 写失败无所谓 */ }
+  };
+  const adapter = new PoolAdapter(() => readState(profile), () => llm, persistLastUse);
+  // 恢复上次命中：只认 24 小时内的，太旧的显示出来只会误导（at 会被前端当成本次时间）。
+  try {
+    const saved = JSON.parse(readFileSync(lastUsePath, "utf8"))?.lastUse || null;
+    if (saved && saved.entry && Number(saved.at) > 0 && Date.now() - Number(saved.at) < 24 * 3600 * 1000) adapter.lastUse = saved;
+  } catch { /* 没有历史或文件损坏，从空开始 */ }
   try {
     llm = llm || ctx.get("llm");
     if (llm?.registerAdapter) {
@@ -1666,7 +1719,42 @@ function apply(ctx) {
         // 运行时动态 adapter（qoder1/trae 等）
         const rt = await collectRuntime();
         for (const r of rt.rows) pushRow(r);
-        const rows = [...map.values()];
+        // 隐藏名单（2026-11-05）：外部插件把上游内部 key（如 qoder 的 qmodel_38max）
+        // 直接注册成模型 id，与本地 catalog 的可读名（Qwen3.8-Max）重复登记，
+        // 同一份上游模型在「全部模型」表里出现两行。
+        // hiddenModels 支持两种写法：完整 key（"provider/modelId"）或裸 modelId。
+        // 裸 id 是必需的——同一批代号会被不同插件注册到 qoder / qodercn / qoder-cn
+        // 等多个 provider id 名下，逐 id 列举必然漏。为空或缺失时不过滤。
+        const hiddenModels = new Set(readState(profile)?.hiddenModels || []);
+        const rows = [...map.values()].filter(
+          (r) => !hiddenModels.has(r.key) && !hiddenModels.has(r.modelId)
+        );
+        // 代号别名（2026-11-05）：部分插件把上游内部 key 直接注册成模型 id
+        // （qoder 的 qmodel_38max / dfmodel 等），「全部模型」表原本裸露 modelId，
+        // 于是整列都是代号。这里给已知代号补可读名——**只改 modelName 这一显示字段**，
+        // 路由、探测、链路仍然用真实 modelId，不动任何请求路径。
+        const CODE_ALIAS = {
+          auto: "Auto", ultimate: "Ultimate", performance: "Performance",
+          efficient: "Efficient", smodel: "Sonus", cmodel: "Cantus",
+          qmodel_38max: "Qwen3.8-Max", qfmodel: "Qwen3.8-Flash",
+          qmodel_latest: "Qwen3.7-Max", qmodel: "Qwen3.7-Plus",
+          kmodel_latest: "Kimi-K3", kmodel: "Kimi-K2.8-Preview",
+          gmodel: "GLM-5.3", gfmodel: "GLM-5.3-Flash",
+          dmodel: "DeepSeek-V4-Pro", dfmodel: "DeepSeek-Flash",
+          mmodel: "MiniMax-M3", q37fmodel: "Qwen3.7-Flash",
+          gm51model: "GLM-5.2"
+        };
+        // 国内版与国际版有两处同名不同代：mmodel 国内是 MiniMax-M2.7（国际是 M3）。
+        // provider id 在运行时是 qodercn（无连字符），catalog 层写的是 qoder-cn，两个都列。
+        const CODE_ALIAS_PROVIDER = {
+          qodercn: { mmodel: "MiniMax-M2.7" },
+          "qoder-cn": { mmodel: "MiniMax-M2.7" }
+        };
+        for (const r of rows) {
+          const perProvider = CODE_ALIAS_PROVIDER[r.provider];
+          const alias = (perProvider && perProvider[r.modelId]) || CODE_ALIAS[r.modelId];
+          if (alias) r.modelName = alias;
+        }
         // 分组名跟随渠道中心：runtime pv.name 打底，connect-channels.json 里用户改的名优先覆盖；
         // 这样渠道中心改名即时生效，本地硬编码名只在两处都缺失时兜底。
         const nameByProvider = new Map(rt.providers.map((p) => [p.provider, p.displayName]));
@@ -1908,6 +1996,7 @@ function apply(ctx) {
         if (body.schemes) state.schemes = body.schemes;
         if (body.contextWindow !== undefined) state.contextWindow = body.contextWindow; // 全局上下文窗口覆盖
         if (body.cooldownMs !== undefined) state.cooldownMs = body.cooldownMs; // 失败渠道冷却时长（毫秒）
+        if (body.maxBackoffMs !== undefined) state.maxBackoffMs = body.maxBackoffMs; // 指数退避上限（毫秒）
         // 按供应商记忆档位：整体替换（前端传全量映射），不做深合并，避免删不掉旧键
         if (body.providerEfforts !== undefined && body.providerEfforts !== null && typeof body.providerEfforts === "object") {
           state.providerEfforts = body.providerEfforts;

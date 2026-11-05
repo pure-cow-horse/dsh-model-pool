@@ -428,7 +428,7 @@
     const passesFilter = (m, except) => {
       if (!showUnreg && m.registered === false) return false;
       if (q) {
-        const hay = [m.modelId, m.displayName, m.provider, familyOf(m.modelId)].join(" ").toLowerCase();
+        const hay = [m.modelId, m.modelName, m.displayName, m.provider, familyOf(m.modelName || m.modelId)].join(" ").toLowerCase();
         if (!hay.includes(q)) return false;
       }
       for (const [col, val] of Object.entries(columnFilters)) {
@@ -1013,8 +1013,8 @@
             return React.createElement("tr", { key: m.key, style: { opacity: unavailable ? 0.45 : 1 } },
               React.createElement("td", { style: styles.td }, React.createElement("input", { type: "checkbox", disabled: unavailable, checked: !!checked[m.key], onChange: () => setChecked((p) => ({ ...p, [m.key]: !p[m.key] })) })),
               React.createElement("td", { style: styles.td }, m.displayName),
-              React.createElement("td", { style: styles.td }, m.modelId),
-              React.createElement("td", { style: styles.td }, familyOf(m.modelId)),
+              React.createElement("td", { style: styles.td, title: m.modelId }, m.modelName || m.modelId),
+              React.createElement("td", { style: styles.td }, familyOf(m.modelName || m.modelId)),
               React.createElement("td", { style: styles.td }, m.free ? "是" : m.configured ? "—" : "?"),
               React.createElement("td", { style: styles.td }, badge(m.key)),
               React.createElement("td", { style: styles.td }, unavailable ? "未注册" : React.createElement(React.Fragment, null,
@@ -1083,7 +1083,13 @@
         current?.lastUse
           ? React.createElement("div", null,
               React.createElement("div", null, "供应商：", React.createElement("b", null, friendlyProvider(current.lastUse.provider)), "　模型：", React.createElement("b", null, friendlyModel(current.lastUse.provider, current.lastUse.model))),
-              React.createElement("div", { style: { color: "#666", marginTop: 2 } }, `方案 ${current.lastUse.scheme} · 尝试 ${current.lastUse.attempts} 条 · ${new Date(current.lastUse.at).toLocaleTimeString()}`)
+              React.createElement("div", { style: { color: "#666", marginTop: 2 } }, `方案 ${current.lastUse.scheme} · 尝试 ${current.lastUse.attempts} 条 · ${(() => {
+                // 命中时间可能是上次进程留下的（lastUse 已落盘），跨天时带上日期，
+                // 否则一个昨天的 17:07 会被读成「刚才」。
+                const d = new Date(current.lastUse.at);
+                const sameDay = d.toDateString() === new Date().toDateString();
+                return (sameDay ? "" : `${d.getMonth() + 1}/${d.getDate()} `) + d.toLocaleTimeString();
+              })()}`)
             )
           : React.createElement("div", { style: { color: "#888" } }, "尚未通过模型池发起请求"),
         current && Array.isArray(current.attempts) && current.attempts.some((a) => !a.ok)
@@ -1097,7 +1103,7 @@
           : null,
         current && Array.isArray(current.cooling) && current.cooling.length > 0
           ? React.createElement("div", { style: { marginTop: 6, fontSize: 12, color: "#666" } },
-              "冷却中：" + current.cooling.map((x) => `${x.entry}（剩 ${Math.ceil(x.remainingMs / 1000)}s）`).join("、"))
+              "冷却中：" + current.cooling.map((x) => `${x.entry}（剩 ${Math.ceil(x.remainingMs / 1000)}s${(x.streak ?? 1) > 1 ? ` · 第${x.streak}次退避` : ""}``).join("、"))
           : null
       ),
       React.createElement("div", { style: { ...styles.toolbar, marginBottom: 10 } },
@@ -1121,7 +1127,7 @@
           type: "text",
           inputMode: "numeric",
           placeholder: "60",
-          title: "失败渠道在这段时间内不参与顺延，5～3600 秒",
+          title: "基准冷却时长；连续失败按指数退避递增（2x、4x...，上限 500 秒），调用成功后自动重置",
           value: coolInput !== null ? coolInput : String(Math.round((state.cooldownMs ?? 60000) / 1000)),
           onChange: (e) => setCoolInput(e.target.value),
           onBlur: () => {
@@ -1133,7 +1139,7 @@
             api("/api/model-pool/chain", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cooldownMs: clamped * 1000 }) }).then(loadState);
           }
         }),
-        React.createElement("span", { style: { fontSize: 12, color: "#999" } }, "失败渠道在此期间不参与顺延")
+        React.createElement("span", { style: { fontSize: 12, color: "#999" } }, "失败基准冷却；连续失败指数退避至多 500s")
       ),
       React.createElement("div", { style: styles.toolbar },
         React.createElement("select", { style: styles.select, value: state.activeScheme, onChange: (e) => switchScheme(e.target.value) },
@@ -1414,7 +1420,13 @@
     // 对话输入框模型名标签：在 ModelPool 方案名后追加实际命中供应商（子槽，失败不阻断）
     try {
       ctx.slots.inject("conversation.input.model.label", () => ctx.slots.register({
-        name: "conversation.input.model.label"
+        name: "conversation.input.model.label",
+        // 2026-11-05：这个槽是 single slot，同优先级二次注册会抛错，
+        // 不同优先级时「最小者渲染」（lowest renders），其余被 shadow。
+        // 宿主自带的 deepseek-model-label 用 0，dsh-connect-workbuddy 用 -0.5，
+        // 原来这里不传就落到默认 0，于是整个 PoolLabel（渠道名 + 档位条）
+        // 被 -0.5 顶掉，界面上两个功能一起消失。取 -2 明确压过 -1 与 -0.5。
+        priority: -2
       }, PoolLabel));
     } catch (e) { /* 子槽契约不符时静默跳过 */ }
   }

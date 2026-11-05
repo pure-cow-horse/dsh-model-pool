@@ -19,4 +19,4 @@ DESIGN.md
 Thumbs.db
 .vscode/
 .idea/
-dist/*.bak_*
+dist/*.bak*
