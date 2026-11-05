@@ -151,6 +151,7 @@
     const [upstreamSel, setUpstreamSel] = useState({}); // provider -> {modelId:boolean}
     const [upstreamBusy, setUpstreamBusy] = useState(""); // 正在拉取的 provider
     const [upstreamKw, setUpstreamKw] = useState({}); // provider -> 该目录内的搜索词（各供应商互不干扰）
+    const [detailModal, setDetailModal] = useState(null); // 诊断详情弹窗状态
 
     const loadModels = async (manual) => {
       if (manual) { setRefreshing(true); setNotice(null); }
@@ -1096,14 +1097,37 @@
           ? React.createElement("div", { style: { marginTop: 8, paddingTop: 6, borderTop: "1px dashed #cde6cd" } },
               React.createElement("div", { style: { fontWeight: 600, color: "#a15c00", marginBottom: 2 } }, "本次失败/跳过的渠道"),
               current.attempts.filter((a) => !a.ok).slice(-3).map((a, i) =>
-                React.createElement("div", { key: "att" + i, style: { fontSize: 12, color: "#a15c00" } },
-                  `${a.entry}${a.skipped ? "（跳过）" : a.midStream ? "（中途断流）" : ""}：${a.error || "未记录原因"}`)
+                React.createElement("div", {
+                  key: "att" + i,
+                  style: { fontSize: 12, color: "#a15c00", display: "flex", alignItems: "center", gap: 6, marginTop: 2 }
+                },
+                  React.createElement("span", {
+                    style: { flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+                    title: a.error || ""
+                  }, `${a.entry}${a.skipped ? "（跳过）" : a.midStream ? "（中途断流）" : ""}：${a.error || "未记录原因"}`),
+                  React.createElement("button", {
+                    type: "button",
+                    style: {
+                      background: "#fff",
+                      border: "1px solid #d0d7de",
+                      borderRadius: 3,
+                      padding: "0 6px",
+                      fontSize: 11,
+                      lineHeight: "16px",
+                      color: "#0969da",
+                      cursor: "pointer",
+                      flexShrink: 0
+                    },
+                    title: "查看此渠道的完整错误原因、状态码与执行详情",
+                    onClick: () => setDetailModal(a)
+                  }, "详情")
+                )
               )
             )
           : null,
         current && Array.isArray(current.cooling) && current.cooling.length > 0
           ? React.createElement("div", { style: { marginTop: 6, fontSize: 12, color: "#666", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" } },
-              React.createElement("span", null, "冷却中：" + current.cooling.map((x) => `${x.entry}（剩 ${Math.ceil(x.remainingMs / 1000)}s${(x.streak ?? 1) > 1 ? ` · 第${x.streak}次退避` : ""}``).join("、")),
+              React.createElement("span", null, "冷却中：" + current.cooling.map((x) => `${x.entry}（剩 ${Math.ceil(x.remainingMs / 1000)}s${(x.streak ?? 1) > 1 ? ` · 第${x.streak}次退避` : ""}`).join("、")),
               React.createElement("button", {
                 type: "button",
                 style: {
@@ -1224,9 +1248,97 @@
       ))
     );
 
+    const renderDetailModal = () => {
+      if (!detailModal) return null;
+      return React.createElement("div", {
+        style: {
+          position: "fixed",
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: "rgba(0, 0, 0, 0.45)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          zIndex: 99999
+        },
+        onClick: () => setDetailModal(null)
+      },
+        React.createElement("div", {
+          style: {
+            background: "#fff",
+            borderRadius: 8,
+            padding: "16px 20px",
+            width: 580,
+            maxWidth: "92vw",
+            maxHeight: "82vh",
+            overflow: "auto",
+            boxShadow: "0 8px 24px rgba(0, 0, 0, 0.2)",
+            fontSize: 13,
+            color: "#24292f"
+          },
+          onClick: (e) => e.stopPropagation()
+        },
+          React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, borderBottom: "1px solid #eee", paddingBottom: 8 } },
+            React.createElement("span", { style: { fontWeight: 600, fontSize: 14 } }, "渠道失败/跳过诊断详情"),
+            React.createElement("button", {
+              type: "button",
+              style: { background: "none", border: "none", fontSize: 18, cursor: "pointer", color: "#666", lineHeight: 1 },
+              onClick: () => setDetailModal(null)
+            }, "×")
+          ),
+          React.createElement("div", { style: { display: "grid", gridTemplateColumns: "84px 1fr", gap: "6px 12px", marginBottom: 12, fontSize: 12 } },
+            React.createElement("span", { style: { color: "#666" } }, "渠道标识:"),
+            React.createElement("span", { style: { fontFamily: "monospace", fontWeight: 600 } }, detailModal.entry || "—"),
+            React.createElement("span", { style: { color: "#666" } }, "发生时间:"),
+            React.createElement("span", null, new Date(detailModal.at || Date.now()).toLocaleString()),
+            React.createElement("span", { style: { color: "#666" } }, "执行耗时:"),
+            React.createElement("span", null, detailModal.durationMs ? `${detailModal.durationMs} ms` : "—"),
+            React.createElement("span", { style: { color: "#666" } }, "事件类别:"),
+            React.createElement("span", { style: { color: detailModal.skipped ? "#0969da" : "#cf222e", fontWeight: 600 } },
+              detailModal.skipped ? "避障跳过 (Skipped)" : detailModal.midStream ? "中途断流 (Mid-stream)" : "发起级失败 (Connect Fail)"),
+            detailModal.status ? React.createElement("span", { style: { color: "#666" } }, "HTTP 状态:") : null,
+            detailModal.status ? React.createElement("span", { style: { fontFamily: "monospace", color: "#cf222e", fontWeight: 600 } }, `HTTP ${detailModal.status}`) : null,
+            detailModal.code ? React.createElement("span", { style: { color: "#666" } }, "错误代码:") : null,
+            detailModal.code ? React.createElement("span", { style: { fontFamily: "monospace" } }, String(detailModal.code)) : null,
+            React.createElement("span", { style: { color: "#666" } }, "错误摘要:"),
+            React.createElement("span", { style: { color: "#a15c00" } }, detailModal.error || "未记录错误摘要")
+          ),
+          React.createElement("div", { style: { marginTop: 8 } },
+            React.createElement("div", { style: { fontWeight: 600, marginBottom: 4, color: "#555", fontSize: 12 } }, "原始错误报文 / 堆栈 (Raw Payload):"),
+            React.createElement("pre", {
+              style: {
+                background: "#f6f8fa",
+                border: "1px solid #d0d7de",
+                borderRadius: 6,
+                padding: "8px 10px",
+                maxHeight: 220,
+                overflow: "auto",
+                fontFamily: "monospace",
+                fontSize: 11,
+                lineHeight: "16px",
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-all",
+                margin: 0
+              }
+            }, detailModal.rawError || detailModal.error || "无更详细的上游报文")
+          ),
+          React.createElement("div", { style: { display: "flex", justifyContent: "flex-end", marginTop: 14 } },
+            React.createElement("button", {
+              type: "button",
+              style: { ...styles.btn, ...styles.btnPrimary },
+              onClick: () => setDetailModal(null)
+            }, "知道了")
+          )
+        )
+      );
+    };
+
     return React.createElement("div", { style: styles.wrap },
       tabBar,
-      tab === "models" ? modelsPane : tab === "usage" ? usagePane : schemesPane
+      tab === "models" ? modelsPane : tab === "usage" ? usagePane : schemesPane,
+      renderDetailModal()
     );
   }
 
@@ -1312,9 +1424,43 @@
       return () => { alive = false; clearInterval(t); };
     }, []);
 
+    // 倍率读数（2026-11-05）：模型池占住输入框单槽后，dsh-connect-workbuddy 的
+    // 胶囊被压掉，切到具体模型时连「这个模型花多少积分」也一起看不见了。
+    // 这里直连它的只读用量路由把这一条补回来——同源、只读、拿不到就静默降级，
+    // 插件没装 / 停用 / 改版都不影响对话。
+    const [wbRate, setWbRate] = useState(null);
+    useEffect(() => {
+      let alive = true;
+      const hitId = (use && use.model) || (props && props.model && props.model.id) || "";
+      if (!hitId) { setWbRate(null); return () => { alive = false; }; }
+      const readUsage = async (region) => {
+        const r = await fetch(`/plugins/dsh-connect-workbuddy/usage?region=${region}`, { credentials: "same-origin", cache: "no-store" });
+        return r.ok ? r.json() : null;
+      };
+      (async () => {
+        try {
+          const body = (await readUsage("cn")) || (await readUsage("global"));
+          if (!alive || !body) return;
+          const hit = (Array.isArray(body.models) ? body.models : []).find((x) => x && x.id === hitId);
+          setWbRate(hit && typeof hit.creditMultiplier === "number" ? hit.creditMultiplier : null);
+        } catch { if (alive) setWbRate(null); }
+      })();
+      return () => { alive = false; };
+    }, [use && use.model, props && props.model && props.model.id]);
+
     const name = props?.model?.name || "";
     const isPool = props?.provider?.id === "ModelPool" || props?.model?.provider === "ModelPool";
-    if (!isPool) return React.createElement("span", null, name);
+    const rateBadge = wbRate === null
+      ? null
+      : React.createElement("span", {
+          title: "该模型每百万 token 的积分倍率（读数来自 WorkBuddy 渠道）",
+          style: { marginLeft: 6, color: "#8b949e", whiteSpace: "nowrap", flexShrink: 0 }
+        }, `· x${wbRate.toFixed(2)}`);
+    // 非池路由（用户在模型选择器里直接点了某个具体模型）也要把倍率带上，
+    // 否则这里只剩一个光秃秃的模型名。
+    if (!isPool) {
+      return React.createElement("span", { style: { display: "inline-flex", alignItems: "center", minWidth: 0 } }, name, rateBadge);
+    }
 
     // 档位控件（2026-11-03 第三版：跟着供应商实际能力走）。
     // 宿主里档位是 per-model 能力，供应商不同档位就不同（有的只给 off/high/max，
@@ -1410,12 +1556,13 @@
         style: { display: "inline-flex", alignItems: "center", width: "100%", minWidth: 0 }
       }, React.createElement("span", {
         style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }
-      }, name), effortBar);
+      }, name, rateBadge), effortBar);
     }
 
-    // 闭合按钮(trigger)：命中标签 + 当前档位纯文本
+    // 闭合按钮(trigger)：命中标签 + 倍率 + 当前档位纯文本
     return React.createElement("span", { style: { display: "inline-flex", alignItems: "center", minWidth: 0 } },
       label,
+      rateBadge,
       React.createElement("span", {
         title: `推理等级：${levelName(current)}（点开模型名可调；按供应商记忆）`,
         style: { marginLeft: 6, color: "#8b949e", whiteSpace: "nowrap", flexShrink: 0 }

@@ -864,6 +864,43 @@ function describeFailure(fail, prefix) {
 }
 
 
+
+// 多模态（图片输入）请求判定
+function requestHasImages(options) {
+  if (!options) return false;
+  const msgs = Array.isArray(options.messages) ? options.messages : [];
+  for (const msg of msgs) {
+    if (!msg) continue;
+    if (Array.isArray(msg.content)) {
+      for (const part of msg.content) {
+        if (!part || typeof part !== "object") continue;
+        const type = String(part.type || "").toLowerCase();
+        if (type === "image" || type === "image_url" || type === "input_image") return true;
+        if (part.image || part.image_url) return true;
+      }
+    }
+    if (Array.isArray(msg.attachments)) {
+      for (const att of msg.attachments) {
+        if (!att || typeof att !== "object") continue;
+        const mime = String(att.mimeType || att.mime_type || att.type || "").toLowerCase();
+        if (mime.startsWith("image/")) return true;
+      }
+    }
+  }
+  if (Array.isArray(options.images) && options.images.length > 0) return true;
+  return false;
+}
+
+// 启发式检测模型是否具备多模态视觉能力
+function isVisionCapableModel(provider, model) {
+  const m = String(model || "").toLowerCase();
+  if (/vision|vl|-v\b|4o|gemini|claude|omni|pixtral|minicpm-v|internvl|qwen.*max|qwen.*plus|glm-4v|glm-5/i.test(m)) {
+    if (/coder|code/i.test(m)) return false;
+    return true;
+  }
+  return false;
+}
+
 class PoolAdapter {
   constructor(readStateFn, getLlm, onLastUse) {
     this.readState = readStateFn;
@@ -871,6 +908,7 @@ class PoolAdapter {
     this.onLastUse = typeof onLastUse === "function" ? onLastUse : null;
     this.cooldown = new Map(); // selector -> untilMs
     this.failureStreaks = new Map(); // entry -> 连续失败次数
+    this.visionCache = new Map(); // entry -> boolean (多模态能力缓存)
     this.lastUse = null;       // 最近一次成功命中 {scheme,provider,model,entry,at,attempts}
     this.attempts = [];        // 最近一次调用的逐条尝试记录
     this.registered = new Set(); // 宿主当前已注册 adapter 的 provider id 缓存；空=未知，不硬过滤
@@ -912,6 +950,26 @@ class PoolAdapter {
     this.cooldown.set(entry, now + cooldownMs);
     __poolDiag(`[stream] 候选 ${entry} 连续失败第 ${streak} 次，退避冷却 ${Math.round(cooldownMs / 1000)}s（基准 ${Math.round(baseMs / 1000)}s，上限 ${Math.round(maxBackoffMs / 1000)}s）`);
     return cooldownMs;
+  }
+    // 解析模型是否支持视觉输入能力
+  async modelSupportsVision(provider, model) {
+    const key = `${provider}/${model}`;
+    if (this.visionCache.has(key)) return this.visionCache.get(key);
+    let supported = false;
+    const llm = this.getLlm();
+    if (llm && typeof llm.resolveModelInfo === "function") {
+      try {
+        const info = await llm.resolveModelInfo(provider, model);
+        if (info && Array.isArray(info.inputModalities)) {
+          supported = info.inputModalities.includes("image");
+          this.visionCache.set(key, supported);
+          return supported;
+        }
+      } catch { /* 忽略，进入降级检测 */ }
+    }
+    supported = isVisionCapableModel(provider, model);
+    this.visionCache.set(key, supported);
+    return supported;
   }
   providerInfo(provider) { return { id: provider, name: "ModelPool" }; }
   // 虚拟模型 id 即方案名；Auto 跟随当前激活方案
@@ -1007,7 +1065,8 @@ class PoolAdapter {
   async *stream(options) {
     const llm = this.getLlm();
     const { name: schemeName, chain, effort } = this._chainOf(options?.model);
-    __poolDiag(`[stream] enter model=${options?.model} scheme=${schemeName} chain=${chain.length} effort=${effort || "(跟随宿主)"}`);
+    const hasImages = requestHasImages(options);
+    __poolDiag(`[stream] enter model=${options?.model} scheme=${schemeName} chain=${chain.length} effort=${effort || "(跟随宿主)"} hasImages=${hasImages}`);
     if (!llm) throw new Error("ModelPool: llm 运行时不可用");
     if (chain.length === 0) throw new Error(`ModelPool: 方案「${schemeName || "未命名"}」链路为空，请在面板勾选模型并保存`);
     const now = Date.now();
@@ -1028,14 +1087,36 @@ class PoolAdapter {
     };
     let lastError;
     for (const c of candidates) {
-      const attempt = { entry: c.entry, provider: c.provider, model: c.model, at: now, ok: false, error: null, skipped: false };
+      const attempt = {
+        entry: c.entry,
+        provider: c.provider,
+        model: c.model,
+        at: now,
+        ok: false,
+        error: null,
+        rawError: null,
+        code: null,
+        status: null,
+        durationMs: 0,
+        skipped: false,
+        midStream: false
+      };
       this.attempts.push(attempt);
       __poolDiag(`[stream] 尝试 ${c.entry}`);
       // 已注册集合非空时，跳过宿主未注册 adapter 的 provider（如停用对接插件后的 workbuddy/workbuddy-ai）
       if (this.registered.size && !this.registered.has(c.provider)) {
         attempt.skipped = true;
         attempt.error = "宿主未注册该 provider 的 adapter";
+        attempt.rawError = `宿主当前注册列表未包含供应商「${c.provider}」，对应插件可能已关闭或未启动。`;
         // 结构性缺失，不写冷却：每次由 registered 实时判断，插件重新启用后立即恢复
+        continue;
+      }
+      // 多模态（图片输入）避障：当请求含图片时，跳过不支持视觉的纯文本模型，不计失败、不入冷却
+      if (hasImages && !(await this.modelSupportsVision(c.provider, c.model))) {
+        attempt.skipped = true;
+        attempt.error = "模型未声明图片输入能力（多模态避障跳过）";
+        attempt.rawError = `当前对话包含图片附件，但候选渠道 ${c.entry} 仅支持纯文本输入。为避免上游 400 报错崩溃，已自动平滑避障调度至下一候选。`;
+        __poolDiag(`[stream] ${c.entry} 不支持图片输入，多模态智能避障跳过`);
         continue;
       }
       // 第一次按方案指定强度尝试；若该渠道明确不支持此强度，自动去掉强度用其默认模式重试一次，避免误降级。
@@ -1084,8 +1165,13 @@ class PoolAdapter {
         return; // 任一变体成功，整条链路结束
       }
       // 全部变体都失败
+      const durationMs = Date.now() - now;
       lastError = variantErr;
+      attempt.durationMs = durationMs;
       attempt.error = variantErr?.message || String(variantErr);
+      attempt.rawError = variantErr?.stack || String(variantErr);
+      attempt.code = variantErr?.code || (variantErr?.name && variantErr.name !== "Error" ? variantErr.name : null);
+      attempt.status = variantErr?.status || variantErr?.statusCode || null;
       __poolDiag(`[stream] 候选 ${c.entry} 失败: ${variantErr?.message}\n${variantErr?.stack || ""}`);
       this._recordFailure(c.entry, now); // 发起级失败：指数退避冷却，到期回到链头
       continue;
@@ -1135,7 +1221,11 @@ class PoolAdapter {
         // 的哑失败，而且下一轮还会从这条渠道再撞一次。
         attempt.ok = false;
         attempt.midStream = true;
+        attempt.durationMs = Date.now() - now;
         attempt.error = describeFailure(fail, `${c.entry} 中途失败`);
+        attempt.code = fail?.code || null;
+        attempt.status = fail?.status || null;
+        attempt.rawError = fail ? (typeof fail === "object" ? JSON.stringify(fail, null, 2) : String(fail)) : attempt.error;
         if (this.lastUse && this.lastUse.entry === c.entry) this.lastUse.midStreamError = attempt.error;
         this._recordFailure(c.entry, now);
         yield chunk;
