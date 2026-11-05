@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "description": "DSH 插件：探测供应商上游模型并测试有效性，勾选模型组建多方案故障转移链路，自带顺延引擎接管。",
   "license": "MIT",
+  "scripts": {
+    "probe": "node probes/run-all.mjs"
+  },
   "author": "pure-cow-horse",
   "keywords": [
     "dsh",

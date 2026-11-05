@@ -1160,10 +1160,10 @@
     const disabledProviders = Object.keys((state && state.disabledProviders) || {});
     const disabledStrip = disabledProviders.length === 0 ? null : React.createElement("div", {
       style: {
-        marginBottom: 12,
+        marginTop: 12,
         padding: "10px 14px",
-        background: "rgba(234, 88, 12, 0.08)",
-        border: "1px solid rgba(234, 88, 12, 0.25)",
+        background: "var(--dsw-alias-bg-layer-1, rgba(0,0,0,0.02))",
+        border: "1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.08))",
         borderRadius: 8,
         fontSize: 12,
         display: "flex",
@@ -1172,27 +1172,46 @@
         alignItems: "center"
       }
     },
-      React.createElement("span", { style: { color: "#c2410c", fontWeight: 600 } }, `已禁用 ${disabledProviders.length} 个供应商（不出现在对话的模型列表）`),
+      React.createElement("span", {
+        style: {
+          color: "var(--dsw-alias-label-secondary, #666)",
+          fontWeight: 600,
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 4
+        }
+      }, "🚫 已停用供应商 (" + disabledProviders.length + ")："),
       ...disabledProviders.map((p) => React.createElement("span", {
         key: p,
         style: {
           display: "inline-flex",
           alignItems: "center",
           gap: 6,
-          background: "var(--dsw-alias-bg-layer-1, #fff)",
-          border: "1px solid rgba(234, 88, 12, 0.3)",
+          background: "var(--dsw-alias-bg-layer-2, rgba(0,0,0,0.04))",
+          border: "1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.12))",
           color: "var(--dsw-alias-label-primary, #111)",
-          borderRadius: 999,
-          padding: "2px 8px"
+          borderRadius: 6,
+          padding: "3px 8px",
+          fontSize: 11
         }
       },
-        p,
-        React.createElement("button", { style: { ...styles.btn, height: 22, padding: "0 8px", fontSize: 11 }, onClick: () => toggleProvider(p, true) }, "启用")
+        React.createElement("b", null, p),
+        React.createElement("button", {
+          style: {
+            ...styles.btn,
+            height: 20,
+            padding: "0 6px",
+            fontSize: 10,
+            color: "var(--dsw-alias-button-primary-fill, #4f46e5)",
+            background: "var(--dsw-alias-bg-layer-1, #fff)"
+          },
+          title: "重新启用此供应商，其模型将恢复出现在对话选择器中",
+          onClick: () => toggleProvider(p, true)
+        }, "↺ 启用")
       ))
     );
 
     const modelsPane = React.createElement("div", null,
-      disabledStrip,
       // 顶部操作栏
       React.createElement("div", { style: styles.toolbar },
         React.createElement("button", { style: { ...styles.btn, ...styles.btnPrimary }, onClick: () => loadModels(true), disabled: refreshing }, refreshing ? "刷新中…" : "刷新目录"),
@@ -1402,6 +1421,8 @@
       filtered.length === 0 && React.createElement("div", { style: { padding: "24px 12px", textAlign: "center", fontSize: 12, color: "var(--dsw-alias-label-tertiary, #888)" } },
         "没有符合条件的模型 ",
         React.createElement("button", { style: { ...styles.btn, marginLeft: 8, height: 22, padding: "0 8px", fontSize: 11 }, onClick: clearAll }, "清除筛选")),
+      // 方案 1：已停用供应商移至表格底栏
+      disabledStrip,
       filterPanel()
     );
 

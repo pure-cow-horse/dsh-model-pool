@@ -1864,16 +1864,7 @@ function apply(ctx) {
         // 运行时动态 adapter（qoder1/trae 等）
         const rt = await collectRuntime();
         for (const r of rt.rows) pushRow(r);
-        // 隐藏名单（2026-11-05）：外部插件把上游内部 key（如 qoder 的 qmodel_38max）
-        // 直接注册成模型 id，与本地 catalog 的可读名（Qwen3.8-Max）重复登记，
-        // 同一份上游模型在「全部模型」表里出现两行。
-        // hiddenModels 支持两种写法：完整 key（"provider/modelId"）或裸 modelId。
-        // 裸 id 是必需的——同一批代号会被不同插件注册到 qoder / qodercn / qoder-cn
-        // 等多个 provider id 名下，逐 id 列举必然漏。为空或缺失时不过滤。
-        const hiddenModels = new Set(readState(profile)?.hiddenModels || []);
-        const rows = [...map.values()].filter(
-          (r) => !hiddenModels.has(r.key) && !hiddenModels.has(r.modelId)
-        );
+        const rows = [...map.values()];
         // 代号别名（2026-11-05）：部分插件把上游内部 key 直接注册成模型 id
         // （qoder 的 qmodel_38max / dfmodel 等），「全部模型」表原本裸露 modelId，
         // 于是整列都是代号。这里给已知代号补可读名——**只改 modelName 这一显示字段**，
