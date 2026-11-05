@@ -1102,8 +1102,31 @@
             )
           : null,
         current && Array.isArray(current.cooling) && current.cooling.length > 0
-          ? React.createElement("div", { style: { marginTop: 6, fontSize: 12, color: "#666" } },
-              "冷却中：" + current.cooling.map((x) => `${x.entry}（剩 ${Math.ceil(x.remainingMs / 1000)}s${(x.streak ?? 1) > 1 ? ` · 第${x.streak}次退避` : ""}``).join("、"))
+          ? React.createElement("div", { style: { marginTop: 6, fontSize: 12, color: "#666", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" } },
+              React.createElement("span", null, "冷却中：" + current.cooling.map((x) => `${x.entry}（剩 ${Math.ceil(x.remainingMs / 1000)}s${(x.streak ?? 1) > 1 ? ` · 第${x.streak}次退避` : ""}``).join("、")),
+              React.createElement("button", {
+                type: "button",
+                style: {
+                  background: "#fff",
+                  border: "1px solid #d0d7de",
+                  borderRadius: 4,
+                  padding: "1px 7px",
+                  fontSize: 11,
+                  lineHeight: "16px",
+                  color: "#0969da",
+                  cursor: "pointer",
+                  display: "inline-flex",
+                  alignItems: "center"
+                },
+                title: "清空所有渠道的冷却计时并重置退避阶梯，使其立即参与调度",
+                onClick: async () => {
+                  try {
+                    await api("/api/model-pool/clear-cooldown", { method: "POST" });
+                    await loadCurrent();
+                  } catch { /* 忽略 */ }
+                }
+              }, "↺ 立即清空冷却与退避")
+            )
           : null
       ),
       React.createElement("div", { style: { ...styles.toolbar, marginBottom: 10 } },

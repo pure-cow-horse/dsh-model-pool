@@ -1212,6 +1212,16 @@ class PoolAdapter {
         .filter((x) => x.remainingMs > 0)
     };
   }
+  // 清空冷却与连续失败退避计数（支持指定 entry 或清空全部）
+  clearCooldown(entry = null) {
+    if (entry) {
+      this.cooldown.delete(entry);
+      this.failureStreaks.delete(entry);
+    } else {
+      this.cooldown.clear();
+      this.failureStreaks.clear();
+    }
+  }
 }
 //#endregion
 
@@ -1848,6 +1858,27 @@ function apply(ctx) {
       try {
         sendJson(res, 200, { ok: true, status: typeof adapter.status === "function" ? adapter.status() : null, routeConflicts });
       } catch (e) { sendJson(res, 500, { ok: false, error: e.message }); }
+    }
+  });
+
+  // POST /api/model-pool/clear-cooldown { entry? } —— 一键清空冷却与连续失败退避计数
+  reg({
+    kind: "exact",
+    path: "/api/model-pool/clear-cooldown",
+    handler: async (req, res) => {
+      if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "只接受 POST" });
+      if (!isLocalOrigin(req)) return sendJson(res, 403, { ok: false, error: "拒绝非本地来源" });
+      let body = {};
+      try { body = await readJsonBody(req); } catch { /* 允许空 body */ }
+      const entry = body && typeof body.entry === "string" && body.entry.trim() ? body.entry.trim() : null;
+      if (typeof adapter.clearCooldown === "function") {
+        adapter.clearCooldown(entry);
+      }
+      sendJson(res, 200, {
+        ok: true,
+        cleared: entry || "all",
+        status: typeof adapter.status === "function" ? adapter.status() : null
+      });
     }
   });
 
