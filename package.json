@@ -1,6 +1,6 @@
 {
   "name": "dsh-model-pool",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "DSH 插件：探测供应商上游模型并测试有效性，勾选模型组建多方案故障转移链路，自带顺延引擎接管。",
   "license": "MIT",
   "scripts": {
@@ -9,6 +9,7 @@
   "author": "pure-cow-horse",
   "keywords": [
     "dsh",
+    "dsh-plugin",
     "deepseek-harness",
     "model-pool",
     "failover",
@@ -27,9 +28,11 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "dist",
+    "dist/client.js",
+    "dist/index.js",
     "cordis.patch.yml",
     "README.md",
+    "README.en.md",
     "LICENSE"
   ],
   "dsh": {
@@ -47,8 +50,8 @@
     "js-yaml": "^4.1.0"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-tools": "^0.1.0-rc.8 || ^0.2.0-rc.2",
-    "@deepseek-ai/dsh-llm": "^0.2.0-rc.2"
+    "@deepseek-ai/cordis": ">=4.0.1-rc.1 <5.0.0 || >=4.0.2 <5.0.0",
+    "@deepseek-ai/dsh-tools": ">=0.2.0-rc.2 <0.3.0-0 || >=0.2.2-rc.1 <0.3.0-0",
+    "@deepseek-ai/dsh-llm": ">=0.2.0-rc.2 <0.3.0-0 || >=0.2.2-rc.1 <0.3.0-0"
   }
 }
