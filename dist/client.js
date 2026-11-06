@@ -2102,10 +2102,18 @@
     // 胶囊被压掉，切到具体模型时连「这个模型花多少积分」也一起看不见了。
     // 这里直连它的只读用量路由把这一条补回来——同源、只读、拿不到就静默降级，
     // 插件没装 / 停用 / 改版都不影响对话。
+    // 路由类型先算出来（2026-11-06 修）：池模式取「实际命中」，直连取「当前选中」。
+    // 原写法 `(use && use.model) || props.model.id` 把池子上次命中的记录排在前面，
+    // 而 lastUse 一旦写过就一直有值 —— 用户直连别的模型时它仍然存在，把
+    // props.model.id 完全盖住，于是换任何模型都显示池子那条链的倍率（实测恒为
+    // deepseek-v4.1-flash 的 0.11）。池模式下两者本来就同源，直连模式下必须用后者。
+    const isPool = props?.provider?.id === "ModelPool" || props?.model?.provider === "ModelPool";
     const [wbRate, setWbRate] = useState(null);
     useEffect(() => {
       let alive = true;
-      const hitId = (use && use.model) || (props && props.model && props.model.id) || "";
+      const hitId = isPool
+        ? ((use && use.model) || "")
+        : ((props && props.model && props.model.id) || "");
       if (!hitId) { setWbRate(null); return () => { alive = false; }; }
       const readUsage = async (region) => {
         const r = await fetch(`/plugins/dsh-connect-workbuddy/usage?region=${region}`, { credentials: "same-origin", cache: "no-store" });
@@ -2120,10 +2128,9 @@
         } catch { if (alive) setWbRate(null); }
       })();
       return () => { alive = false; };
-    }, [use && use.model, props && props.model && props.model.id]);
+    }, [isPool, use && use.model, props && props.model && props.model.id]);
 
     const name = props?.model?.name || "";
-    const isPool = props?.provider?.id === "ModelPool" || props?.model?.provider === "ModelPool";
     const rateBadge = wbRate === null
       ? null
       : React.createElement("span", {
