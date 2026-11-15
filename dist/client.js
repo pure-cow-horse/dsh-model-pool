@@ -279,6 +279,9 @@
     const [ctxInput, setCtxInput] = useState(null); // 上下文窗口输入中的原始字符串（null=用紧凑显示）
     const [coolInput, setCoolInput] = useState(null); // 失败冷却秒数输入中的原始字符串
     const [chainTest, setChainTest] = useState(null); // 最近一次链路自检结果 {scheme,chain,results,testedAt}
+    // P0-3：链路自检期间逐行显示「待检查」，并在每条返回时立即回填结果。
+    const [chainPending, setChainPending] = useState({}); // key -> true
+    const [chainProgress, setChainProgress] = useState(null); // { done, total }
     const [usage, setUsage] = useState(null); // 用量页：{today,days,rows,totals,reconcile}
     const [usageBusy, setUsageBusy] = useState(false);
     const [usageSpan, setUsageSpan] = useState(7); // 1 / 7 / 30
@@ -469,28 +472,79 @@
     };
 
     /**
-     * 链路自检：只测「当前激活方案」链上的条目，按链顺序返回。
-     * 和 testAll 的区别不只是范围——它走 /test-chain，能让运行时注册的渠道
-     * （qoder / trae / workbuddy4）经宿主运行时真发一次请求，而单模型 /test 只认配置行。
+     * 链路自检：只测「当前激活方案」链上的条目，逐条回填结果。
+     * 点击瞬间先把所有链上行置为「⏳ 待检查」，避免顶层显示“自检中”而表格
+     * 仍停留在旧延迟/旧冷却。每条 POST /test 返回后立刻替换该行，全部完成再落盘。
      */
     const testChain = async () => {
+      const chain = Array.isArray(state.schemes?.[state.activeScheme]?.chain)
+        ? state.schemes[state.activeScheme].chain.filter((x) => typeof x === "string" && x)
+        : [];
+      if (chain.length === 0) {
+        setNotice({ type: "err", text: "当前方案链为空" });
+        return;
+      }
       setBusy(true);
       setNotice(null);
+      setChainTest(null);
+      setChainProgress({ done: 0, total: chain.length });
+      setChainPending(Object.fromEntries(chain.map((k) => [k, true])));
+      setTesting((prev) => {
+        const n = { ...prev };
+        for (const k of chain) n[k] = true;
+        return n;
+      });
+      const out = { ...results };
       try {
-        const j = await api("/api/model-pool/test-chain", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
-        if (j.ok) {
-          const merged = { ...results, ...j.results };
-          setResults(merged);
-          setChainTest(j);
-          setLastTestAt(j.testedAt);
-          saveProbe(merged, j.testedAt);
-        } else {
-          setNotice(j.error || "链路自检失败");
+        const conc = 4;
+        for (let i = 0; i < chain.length; i += conc) {
+          await Promise.all(chain.slice(i, i + conc).map(async (key) => {
+            let next;
+            try {
+              const j = await api("/api/model-pool/test", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ key })
+              });
+              next = j && j.ok === false
+                ? { status: "fail", error: j.error || "接口返回失败" }
+                : (j || { status: "fail", error: "空结果" });
+            } catch (error) {
+              next = { status: "fail", error: error instanceof Error ? error.message : String(error) };
+            }
+            out[key] = next;
+            setResults({ ...out });
+            setTesting((prev) => {
+              const n = { ...prev };
+              delete n[key];
+              return n;
+            });
+            setChainPending((prev) => {
+              const n = { ...prev };
+              delete n[key];
+              return n;
+            });
+            setChainProgress((prev) => prev
+              ? { ...prev, done: Math.min(prev.total, prev.done + 1) }
+              : prev);
+          }));
         }
+        const testedAt = Date.now();
+        setLastTestAt(testedAt);
+        setChainTest({ ok: true, scheme: state.activeScheme, chain, results: { ...out }, testedAt });
+        saveProbe({ ...out }, testedAt);
       } catch (e) {
-        setNotice(String(e?.message || e));
+        setNotice({ type: "err", text: String(e?.message || e) });
+      } finally {
+        setBusy(false);
+        setChainProgress(null);
+        setTesting((prev) => {
+          const n = { ...prev };
+          for (const k of chain) delete n[k];
+          return n;
+        });
+        setChainPending({});
       }
-      setBusy(false);
     };
     const builtinRank = (kind) => {
       const sel = models.filter((m) => checked[m.key]);
@@ -1635,7 +1689,7 @@
         React.createElement("select", { style: { ...styles.select, fontWeight: 500 }, value: state.activeScheme, onChange: (e) => switchScheme(e.target.value) },
           Object.keys(state.schemes || {}).map((n) => React.createElement("option", { key: n, value: n }, n))
         ),
-        React.createElement("button", { style: { ...styles.btn, ...styles.btnPrimary }, onClick: testChain, disabled: busy }, busy ? "自检中…" : "⚡ 测试当前链路"),
+        React.createElement("button", { style: { ...styles.btn, ...styles.btnPrimary }, onClick: testChain, disabled: busy }, busy ? (chainProgress ? `自检中 (${chainProgress.done}/${chainProgress.total})…` : "自检中…") : "⚡ 测试当前链路"),
         React.createElement("button", { style: styles.btn, onClick: () => saveScheme(state.activeScheme, builtinRank("tier")) }, "同档聚类"),
         React.createElement("button", { style: styles.btn, onClick: () => saveScheme(state.activeScheme, builtinRank("latency")) }, "延迟优先"),
         React.createElement("button", { style: styles.btn, onClick: () => saveScheme(state.activeScheme, builtinRank("free")) }, "免费优先"),
@@ -1864,19 +1918,20 @@
 
                     // 5. 健康度 / 延迟
                     React.createElement("td", { style: styles.td },
-                      testing[c] === true
+                      chainPending[c] === true
+                        ? React.createElement("span", { style: { ...styles.badge, background: "rgba(79, 70, 229, 0.08)", color: "#4f46e5", border: "1px solid rgba(79, 70, 229, 0.25)" } }, "⏳ 待检查")
+                        : testing[c] === true
                         ? React.createElement("span", { style: { marginLeft: 8, fontSize: 12, color: "#4f46e5" } }, "测中…")
-                        : coolingItem
-                        ? React.createElement("span", {
-                            style: { ...styles.badge, background: "rgba(234, 88, 12, 0.1)", color: "#c2410c", border: "1px solid rgba(234, 88, 12, 0.3)" },
-                            title: `连续失败 ${(coolingItem.streak ?? 1)} 次触发退避`
-                          }, `⏳ 剩 ${Math.ceil(coolingItem.remainingMs / 1000)}s`)
                         : (() => {
-                            if (!r) return React.createElement("span", { style: { ...styles.badge, ...styles.idle } }, "○ 待命");
-                            return React.createElement("span", {
+                            if (r) return React.createElement("span", {
                               style: { ...styles.badge, ...(r.status === "ok" ? styles.ok : r.status === "skip" ? styles.skip : styles.fail) },
                               title: r.error || ""
                             }, `● ${r.status === "ok" ? `${r.latency}ms` : r.status === "skip" ? "跳过" : "失败"}`);
+                            if (coolingItem) return React.createElement("span", {
+                              style: { ...styles.badge, background: "rgba(234, 88, 12, 0.1)", color: "#c2410c", border: "1px solid rgba(234, 88, 12, 0.3)" },
+                              title: `连续失败 ${(coolingItem.streak ?? 1)} 次触发退避`
+                            }, `⏳ 剩 ${Math.ceil(coolingItem.remainingMs / 1000)}s`);
+                            return React.createElement("span", { style: { ...styles.badge, ...styles.idle } }, "○ 待命");
                           })()
                     ),
 
