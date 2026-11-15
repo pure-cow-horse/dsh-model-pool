@@ -2021,8 +2021,9 @@
     const { useState, useEffect, useRef } = getReact();
     const [use, setUse] = useState(null);
     const [byKey, setByKey] = useState({});
-    const [scheme, setScheme] = useState(null);
+    const [chain, setChain] = useState(null);
     const [caps, setCaps] = useState(null);
+    const [wbRate, setWbRate] = useState(null);
     const useSigRef = useRef("-");
     const chainSigRef = useRef("");
     useEffect(() => {
@@ -2049,11 +2050,11 @@
           const ch = await fetch("/api/model-pool/chain", { cache: "no-store" }).then((r) => r.json()).catch(() => null);
           if (!alive || !ch || !ch.ok) return;
           const sn = ch.state?.activeScheme;
-          const effort = ch.state?.schemes?.[sn]?.effort || "";
-          const sig = `${sn}|${effort}`;
+          const schemes = ch.state?.schemes || {};
+          const sig = JSON.stringify([sn, schemes]);
           if (sig === chainSigRef.current) return;
           chainSigRef.current = sig;
-          setScheme({ name: sn, effort });
+          setChain({ active: sn, schemes });
         } catch { /* 忽略 */ }
       };
       const loadModels = async (force) => {
@@ -2102,18 +2103,92 @@
     // 胶囊被压掉，切到具体模型时连「这个模型花多少积分」也一起看不见了。
     // 这里直连它的只读用量路由把这一条补回来——同源、只读、拿不到就静默降级，
     // 插件没装 / 停用 / 改版都不影响对话。
-    // 路由类型先算出来（2026-11-06 修）：池模式取「实际命中」，直连取「当前选中」。
-    // 原写法 `(use && use.model) || props.model.id` 把池子上次命中的记录排在前面，
-    // 而 lastUse 一旦写过就一直有值 —— 用户直连别的模型时它仍然存在，把
-    // props.model.id 完全盖住，于是换任何模型都显示池子那条链的倍率（实测恒为
-    // deepseek-v4.1-flash 的 0.11）。池模式下两者本来就同源，直连模式下必须用后者。
+    // 2026-11-14：倍率模型改成「档位条当前锚定的渠道」，不再一律取 lastUse。
     const isPool = props?.provider?.id === "ModelPool" || props?.model?.provider === "ModelPool";
-    const [wbRate, setWbRate] = useState(null);
+    const name = props?.model?.name || "";
+
+    // 档位锚点（2026-11-14）：模型选择器里的 id 就是方案名（服务端 listModels 如此）。
+    // 之前只看 activeScheme / lastUse，切到别的方案时档位条仍按旧渠道渲染。
+    // 现在的优先级：选中方案内的实际命中 > 选中方案的链首候选 > 非池模式沿用当前模型。
+    const entriesMap = caps?.entries || {};
+    const providerEfforts = caps?.providerEfforts || {};
+    const schemeNames = Object.keys(chain?.schemes || {});
+    const schemeNameOf = (value) => {
+      if (typeof value !== "string") return "";
+      let s = value.trim();
+      s = s.replace(/^model-pool\s*[:/]\s*/i, "");
+      s = s.replace(/^ModelPool\s*\/\s*/i, "");
+      s = s.replace(/\s*[（(]\s*\d+[^）)]*[）)]\s*$/, "");
+      return s.trim();
+    };
+    const modelId = typeof props?.model?.id === "string" ? props.model.id : "";
+    const isAutoModel = isPool && modelId === "Auto";
+    const rawSchemeNames = [modelId, props?.model?.name, props?.model?.model, props?.model?.displayName]
+      .filter((x) => typeof x === "string" && x);
+    const selectedSchemeName = (() => {
+      if (!isPool) return "";
+      if (isAutoModel) {
+        const act = chain?.active;
+        return act && chain?.schemes?.[act] ? act : "";
+      }
+      for (const r of rawSchemeNames) {
+        if (schemeNames.includes(r)) return r;
+        const n = schemeNameOf(r);
+        if (schemeNames.includes(n)) return n;
+      }
+      // 兜底：面板里可能给出 "ModelPool / Gemini flash（4 条链）" 这类展示名
+      let best = "";
+      for (const s of schemeNames) {
+        if (rawSchemeNames.some((r) => {
+          const n = schemeNameOf(r);
+          return n === s || n.startsWith(`${s} `) || n.endsWith(` ${s}`) || n.includes(`/ ${s}`) || n.includes(`/${s}`);
+        })) {
+          if (s.length > best.length) best = s;
+        }
+      }
+      return best;
+    })();
+    const selectedScheme = selectedSchemeName ? (chain?.schemes?.[selectedSchemeName] || null) : null;
+    const selectedChain = Array.isArray(selectedScheme?.chain)
+      ? selectedScheme.chain.filter((x) => typeof x === "string" && x)
+      : [];
+    const selectedEffort = selectedScheme?.effort || "";
+
+    const useScheme = use && typeof use.scheme === "string" ? use.scheme : "";
+    const useEntryInSelected = !!use?.entry && selectedChain.includes(use.entry);
+    const useMatchesSelection = !!use && (selectedSchemeName
+      ? (useEntryInSelected || (useScheme === selectedSchemeName && !use.entry))
+      : true);
+    const anchorEntry = !isPool
+      ? ""
+      : selectedSchemeName
+        ? (useMatchesSelection && use.entry ? use.entry : (selectedChain[0] || ""))
+        : "";
+    const anchorProvider = anchorEntry && anchorEntry.includes("/")
+      ? anchorEntry.slice(0, anchorEntry.indexOf("/"))
+      : "";
+    // 选不中方案时宁可显示“档位未知”，也不能退到能力表第一条（那可能是另一个方案的渠道）
+    const currentProvider = anchorProvider;
+    // 只认锚点条目的精确能力；缺条目就显示“档位未知”，
+    // 不再退到同供应商的另一个模型（同供应商不同模型的档位也可能不同）。
+    const capFor = (key) => (key && entriesMap[key]) || null;
+    const cap = capFor(anchorEntry);
+    let supported = null;
+    if (Array.isArray(cap?.supported)) supported = cap.supported;
+    else if (typeof cap?.supported === "string" && cap.supported) supported = [cap.supported];
+    const names = cap?.names || {};
+    const levelName = (id) => (id === "" ? "自动" : names[id] || { off: "Off", minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "XHigh", max: "Max" }[id] || id);
+    const remembered = providerEfforts[currentProvider];
+    const fallbackEffort = selectedSchemeName
+      ? selectedEffort
+      : (chain?.schemes?.[chain?.active]?.effort || "");
+    const current = typeof remembered === "string" ? remembered : fallbackEffort;
+
     useEffect(() => {
       let alive = true;
       const hitId = isPool
-        ? ((use && use.model) || "")
-        : ((props && props.model && props.model.id) || "");
+        ? (anchorEntry && anchorEntry.includes("/") ? anchorEntry.slice(anchorEntry.indexOf("/") + 1) : "")
+        : modelId;
       if (!hitId) { setWbRate(null); return () => { alive = false; }; }
       const readUsage = async (region) => {
         const r = await fetch(`/plugins/dsh-connect-workbuddy/usage?region=${region}`, { credentials: "same-origin", cache: "no-store" });
@@ -2128,9 +2203,8 @@
         } catch { if (alive) setWbRate(null); }
       })();
       return () => { alive = false; };
-    }, [isPool, use && use.model, props && props.model && props.model.id]);
+    }, [isPool, anchorEntry, modelId]);
 
-    const name = props?.model?.name || "";
     const rateBadge = wbRate === null
       ? null
       : React.createElement("span", {
@@ -2143,38 +2217,10 @@
       return React.createElement("span", { style: { display: "inline-flex", alignItems: "center", minWidth: 0 } }, name, rateBadge);
     }
 
-    // 档位控件（2026-11-03 第三版：跟着供应商实际能力走）。
-    // 宿主里档位是 per-model 能力，供应商不同档位就不同（有的只给 off/high/max，
-    // 有的给 low/medium/high）。所以**只渲染当前供应商支持的档位**，选不到非法值；
-    // 用户选过就写进 providerEfforts[供应商]，运行时每个候选用自己那份。
+    // 档位控件（2026-11-14）：集合与记忆值都锚定到上面算出的 currentProvider。
+    // 同一模型在不同渠道可以有不同档位（aistudio 是 low/medium/high，
+    // aistudio2api 是 off/low/medium/high），所以绝不按模型名合并。
     const stopAll = (e) => { e.stopPropagation(); };
-    const entriesMap = caps?.entries || {};
-    const providerEfforts = caps?.providerEfforts || {};
-    const hitKey = use ? `${use.provider}/${use.model}` : "";
-
-    // 当前供应商：优先用实际命中的，否则退到第一个有能力的候选
-    const currentProvider = (use && use.provider) || (() => {
-      const keys = Object.keys(entriesMap);
-      if (keys.length === 0) return "";
-      return keys[0].slice(0, keys[0].indexOf("/"));
-    })();
-
-    // 该供应商的能力（同一供应商下取第一个有条目的模型；同名模型档位一致）
-    const capFor = (provider) => {
-      if (!provider) return null;
-      if (hitKey && entriesMap[hitKey]) return entriesMap[hitKey];
-      const key = Object.keys(entriesMap).find((k) => k.startsWith(`${provider}/`));
-      return key ? entriesMap[key] : null;
-    };
-
-    const cap = capFor(currentProvider);
-    const supported = Array.isArray(cap?.supported) ? cap.supported : null;
-    const names = cap?.names || {};
-    const levelName = (id) => (id === "" ? "自动" : names[id] || { off: "Off", minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "XHigh", max: "Max" }[id] || id);
-
-    // 记忆值：该供应商上次选的；没选过则跟随方案默认（scheme.effort）
-    const remembered = providerEfforts[currentProvider];
-    const current = typeof remembered === "string" ? remembered : (scheme?.effort || "");
 
     const saveEffort = async (v) => {
       try {
@@ -2193,7 +2239,9 @@
       } catch { /* 下一轮轮询会纠正 */ }
     };
 
-    const label = use
+    // 只有 lastUse 属于当前选中方案时才显示实际命中渠道；跨方案时保留方案名，
+    // 避免出现「模型写着 Gemini flash、下面却是 WorkBuddy」的错位。
+    const label = (use && selectedSchemeName && useMatchesSelection)
       ? (() => {
           const row = byKey[`${use.provider}/${use.model}`];
           const pv = row ? row.displayName : use.provider;
@@ -2245,9 +2293,9 @@
       label,
       rateBadge,
       React.createElement("span", {
-        title: `推理等级：${levelName(current)}（点开模型名可调；按供应商记忆）`,
+        title: `推理等级：${supported === null ? "档位未知" : levelName(current)}（点开模型名可调；按供应商记忆）`,
         style: { marginLeft: 6, color: "#8b949e", whiteSpace: "nowrap", flexShrink: 0 }
-      }, `· ${levelName(current)}`)
+      }, `· ${supported === null ? "档位未知" : levelName(current)}`)
     );
   }
 
@@ -2274,10 +2322,10 @@
         name: "conversation.input.model.label",
         // 2026-11-05：这个槽是 single slot，同优先级二次注册会抛错，
         // 不同优先级时「最小者渲染」（lowest renders），其余被 shadow。
-        // 宿主自带的 deepseek-model-label 用 0，dsh-connect-workbuddy 用 -0.5，
-        // 原来这里不传就落到默认 0，于是整个 PoolLabel（渠道名 + 档位条）
-        // 被 -0.5 顶掉，界面上两个功能一起消失。取 -2 明确压过 -1 与 -0.5。
-        priority: -2
+        // 宿主自带标签用 0；dsh-connect-workbuddy 5.23.0 已把优先级压到 -105，
+        // 原来的 -2 会被它整条顶掉（渠道名 + 档位条一起消失）。
+        // 取 -106 明确压过 WorkBuddy，抢回这一格。
+        priority: -106
       }, PoolLabel));
     } catch (e) { /* 子槽契约不符时静默跳过 */ }
   }

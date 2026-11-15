@@ -549,6 +549,102 @@ function classifyFailure(status, error, bodyText) {
   if (bodyText && !/choices/i.test(bodyText)) return "EMPTY_RESPONSE";
   return "SERVER";
 }
+
+/**
+ * 上游给出的恢复时间（Retry-After / 429 reset）优先于本地指数退避。
+ * 这些工具函数只负责把各种表示（秒、毫秒、HTTP 日期、3 hours 35 minutes）归一成毫秒，
+ * 冷却上限与错误码策略由 PoolAdapter 决定。
+ */
+const UPSTREAM_RETRY_MIN_MS = 5 * 1000;
+const UPSTREAM_RETRY_MAX_MS = 6 * 60 * 60 * 1000;
+const CODED_MIN_COOLDOWN_MS = {
+  AUTH: 60 * 60 * 1000,
+  INVALID_REQUEST: 30 * 60 * 1000,
+  QUOTA: 15 * 60 * 1000
+};
+
+function durationHintMs(text) {
+  const re = /(\d+(?:\.\d+)?)\s*(hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s|小时|分钟|秒)/gi;
+  let total = 0;
+  let match;
+  while ((match = re.exec(String(text || "")))) {
+    const value = Number(match[1]);
+    if (!Number.isFinite(value)) continue;
+    const unit = match[2].toLowerCase();
+    if (/^(hours?|hrs?|h|小时)$/.test(unit)) total += value * 3600 * 1000;
+    else if (/^(minutes?|mins?|m|分钟)$/.test(unit)) total += value * 60 * 1000;
+    else if (/^(seconds?|secs?|s|秒)$/.test(unit)) total += value * 1000;
+  }
+  return total;
+}
+
+function retryAfterMsFromValue(value, alreadyMs = false) {
+  if (value === null || value === undefined) return 0;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    if (value <= 0) return 0;
+    if (alreadyMs) return value;
+    if (value > 1e12) return Math.max(0, value - Date.now());
+    if (value > 1e9) return Math.max(0, value * 1000 - Date.now());
+    return value * 1000;
+  }
+  const text = String(value).trim();
+  if (!text) return 0;
+  if (/^\d+(?:\.\d+)?$/.test(text)) return Number(text) * 1000;
+  const dateMs = Date.parse(text);
+  if (Number.isFinite(dateMs) && dateMs > 0) return Math.max(0, dateMs - Date.now());
+  return durationHintMs(text);
+}
+
+function retryHintMsFromMessage(message) {
+  const text = String(message || "");
+  if (!text) return 0;
+  // 只在 retry/reset/冷却/恢复 附近取时长，避免把错误正文里的普通 "3 hours" 误当成重试时间。
+  const match = text.match(/(?:reset|retry|try\s+again|available|恢复|重试|冷却)[^。\n]{0,80}?((?:\d+(?:\.\d+)?\s*(?:hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s|小时|分钟|秒)[,，\s]*){1,4})/i);
+  return match ? durationHintMs(match[1]) : 0;
+}
+
+function failureRetryAfterMs(failure) {
+  if (!failure) return 0;
+  const msValues = [
+    failure.retryAfterMs, failure.retry_after_ms,
+    failure.failure?.retryAfterMs, failure.failure?.retry_after_ms
+  ];
+  for (const value of msValues) {
+    const ms = retryAfterMsFromValue(value, true);
+    if (ms > 0) return ms;
+  }
+  const secondValues = [
+    failure.retryAfter, failure.retry_after,
+    failure.headers?.["retry-after"], failure.headers?.["Retry-After"],
+    failure.failure?.retryAfter, failure.failure?.retry_after,
+    failure.failure?.headers?.["retry-after"], failure.failure?.headers?.["Retry-After"]
+  ];
+  for (const value of secondValues) {
+    const ms = retryAfterMsFromValue(value);
+    if (ms > 0) return ms;
+  }
+  return retryHintMsFromMessage(failure.message || failure.failure?.message || "");
+}
+
+function failureCode(failure) {
+  if (!failure) return null;
+  const explicit = String(failure.code || failure.failure?.code || "").trim();
+  if (explicit && !/^UNKNOWN$/i.test(explicit)) return explicit;
+  const status = Number(failure.status ?? failure.statusCode ?? failure.failure?.status ?? failure.failure?.statusCode);
+  const message = String(failure.message || failure.failure?.message || "");
+  if (status) return classifyFailure(status, null, message);
+  if (/quota|insufficient|balance|额度|余额/i.test(message)) return "QUOTA";
+  return null;
+}
+
+function makeFailureError(fail, prefix) {
+  const err = new Error(describeFailure(fail, prefix));
+  err.code = fail?.code || null;
+  err.status = fail?.status ?? fail?.statusCode ?? null;
+  err.retryAfterMs = failureRetryAfterMs(fail);
+  err.failure = fail;
+  return err;
+}
 //#endregion
 
 //#region 上游目录拉取 + 模型行
@@ -918,11 +1014,14 @@ class PoolAdapter {
     this.getLlm = getLlm;
     this.onLastUse = typeof onLastUse === "function" ? onLastUse : null;
     this.cooldown = new Map(); // selector -> untilMs
+    this.cooldownMeta = new Map(); // selector -> { code, source, retryAfterMs, message, at }
     this.failureStreaks = new Map(); // entry -> 连续失败次数
     this.visionCache = new Map(); // entry -> boolean (多模态能力缓存)
     this.lastUse = null;       // 最近一次成功命中 {scheme,provider,model,entry,at,attempts}
     this.lastModel = void 0;   // 最近一次 stream 的虚拟模型 id（方案名或 Auto）
     this.attempts = [];        // 最近一次调用的逐条尝试记录
+    this.lastAttempts = [];    // 最近一次非空的尝试记录；全冷却重试时不丢上一次失败详情
+    this.lastAttemptsAt = 0;   // lastAttempts 的时间戳
     this.registered = new Set(); // 宿主当前已注册 adapter 的 provider id 缓存；空=未知，不硬过滤
     // entry → { effort, until }：该渠道明确拒绝过的 reasoning 档位，10 分钟内直接跳过
     this.effortUnsupported = new Map();
@@ -946,21 +1045,48 @@ class PoolAdapter {
     return Math.min(Math.max(raw, 10 * 1000), 3600 * 1000);
   }
   /**
-   * 记录失败并按指数退避计算冷却时长：
-   * 第 1 次失败冷却 baseMs（默认 60s）；
-   * 第 2 次失败 2 * baseMs（120s）；
-   * 第 3 次失败 4 * baseMs（240s）...
-   * 上限限制在 maxBackoffMs（默认 500s）。
+   * 记录失败并计算冷却时长。
+   *
+   * 优先级：
+   *   1. 上游明确给出的恢复时间（Retry-After / 429 "resets in 3 hours..."）；
+   *   2. 错误码对应的最小冷却（AUTH 1h、INVALID_REQUEST 30m、QUOTA 15m）；
+   *   3. 原有指数退避：第 n 次失败 base * 2^(n-1)，上限 maxBackoffMs。
+   *
+   * 这样配额耗尽时不会每 5 分钟重撞一次 429，永久性 401/400 也不会被当成瞬时故障反复重试。
    */
-  _recordFailure(entry, now) {
+  _recordFailure(entry, now = Date.now(), failure = null) {
     const streak = (this.failureStreaks.get(entry) || 0) + 1;
     this.failureStreaks.set(entry, streak);
     const baseMs = this._cooldownMs();
     const maxBackoffMs = this._maxBackoffMs();
-    const factor = Math.pow(2, streak - 1);
-    const cooldownMs = Math.min(baseMs * factor, Math.max(baseMs, maxBackoffMs));
-    this.cooldown.set(entry, now + cooldownMs);
-    __poolDiag(`[stream] 候选 ${entry} 连续失败第 ${streak} 次，退避冷却 ${Math.round(cooldownMs / 1000)}s（基准 ${Math.round(baseMs / 1000)}s，上限 ${Math.round(maxBackoffMs / 1000)}s）`);
+    const code = failureCode(failure);
+    const retryAfterMs = failureRetryAfterMs(failure);
+    let cooldownMs;
+    let source;
+    if (retryAfterMs > 0) {
+      cooldownMs = Math.min(Math.max(retryAfterMs, UPSTREAM_RETRY_MIN_MS), UPSTREAM_RETRY_MAX_MS);
+      source = "upstream";
+    } else {
+      const factor = Math.pow(2, streak - 1);
+      cooldownMs = Math.min(baseMs * factor, Math.max(baseMs, maxBackoffMs));
+      const codedMin = CODED_MIN_COOLDOWN_MS[code];
+      if (codedMin && codedMin > cooldownMs) {
+        cooldownMs = Math.min(codedMin, UPSTREAM_RETRY_MAX_MS);
+        source = `code:${code}`;
+      } else {
+        source = "backoff";
+      }
+    }
+    const until = now + cooldownMs;
+    this.cooldown.set(entry, until);
+    this.cooldownMeta.set(entry, {
+      code: code || null,
+      source,
+      retryAfterMs: retryAfterMs > 0 ? retryAfterMs : null,
+      message: String(failure?.message || failure?.failure?.message || "").slice(0, 200),
+      at: now
+    });
+    __poolDiag(`[stream] 候选 ${entry} 连续失败第 ${streak} 次，冷却 ${Math.round(cooldownMs / 1000)}s（来源 ${source}${code ? `，code=${code}` : ""}${retryAfterMs > 0 ? `，上游恢复 ${Math.round(retryAfterMs / 1000)}s` : ""}）`);
     return cooldownMs;
   }
     // 解析模型是否支持视觉输入能力
@@ -1100,6 +1226,11 @@ class PoolAdapter {
       return { provider, model: rest.join("/"), entry };
     }).filter((c) => (this.cooldown.get(c.entry) || 0) <= now);
     __poolDiag(`[stream] 候选=${candidates.length} 冷却剔除=${chain.length - candidates.length} 顺序=${candidates.map((x) => x.entry).join(" | ")}`);
+    if (candidates.length === 0) {
+      // 宿主在第一轮全失败后常会立刻重试；此时不能抛无信息的兜底错误，
+      // 要把冷却到什么时候、上一次真实错误一并带回去。status().attempts 也会回退到 lastAttempts。
+      throw this._unavailableError(schemeName, chain.length, attempts, now, "ALL_COOLING");
+    }
     // 按供应商记忆档位（方案 A）：每个候选用它自己供应商上次选的档位，
     // 没选过才回落到方案默认值。这样降级到另一家时，不会塞它不认的档位
     // （宿主会报 UNSUPPORTED_REASONING_EFFORT，白白多一次往返）。
@@ -1125,6 +1256,8 @@ class PoolAdapter {
         midStream: false
       };
       attempts.push(attempt);
+      this.lastAttempts = attempts;
+      this.lastAttemptsAt = now;
       __poolDiag(`[stream] 尝试 ${c.entry}`);
       // 已注册集合非空时，跳过宿主未注册 adapter 的 provider（如停用对接插件后的 workbuddy/workbuddy-ai）
       if (this.registered.size && !this.registered.has(c.provider)) {
@@ -1190,6 +1323,7 @@ class PoolAdapter {
       if (usedVariant !== null) {
         this.failureStreaks.delete(c.entry);
         this.cooldown.delete(c.entry);
+        this.cooldownMeta.delete(c.entry);
         return; // 任一变体成功，整条链路结束
       }
       // 全部变体都失败
@@ -1201,11 +1335,26 @@ class PoolAdapter {
       attempt.code = variantErr?.code || (variantErr?.name && variantErr.name !== "Error" ? variantErr.name : null);
       attempt.status = variantErr?.status || variantErr?.statusCode || null;
       __poolDiag(`[stream] 候选 ${c.entry} 失败: ${variantErr?.message}\n${variantErr?.stack || ""}`);
-      this._recordFailure(c.entry, now); // 发起级失败：指数退避冷却，到期回到链头
+      this._recordFailure(c.entry, now, variantErr); // 发起级失败：按错误码/上游 reset 计算冷却
       continue;
     }
     __poolDiag(`[stream] 全部候选失败 lastError=${lastError?.message}`);
-    throw lastError || new Error("ModelPool: 链上所有渠道均不可用");
+    if (!lastError) {
+      // 候选存在但全部被结构性跳过（provider 未注册、模型不支持图片等），
+      // 也要给出可读原因，而不是复用“链上所有渠道均不可用”的兜底文案。
+      const skipped = attempts.filter((attempt) => attempt.skipped);
+      const err = this._unavailableError(schemeName, chain.length, attempts, now, "ALL_SKIPPED");
+      if (skipped.length) {
+        err.message = `ModelPool: 方案「${schemeName || "未命名"}」没有可用候选：${skipped.length}/${chain.length} 条被跳过（${skipped.slice(0, 3).map((attempt) => `${attempt.entry}: ${attempt.error}`).join("；")}）`;
+        err.skipped = skipped.map((attempt) => ({ entry: attempt.entry, error: attempt.error }));
+      }
+      throw err;
+    }
+    lastError.attempts = attempts;
+    lastError.cooling = this._coolingSnapshot(now);
+    lastError.scheme = schemeName || null;
+    if (!lastError.code) lastError.code = "POOL_EXHAUSTED";
+    throw lastError;
   }
   // 对单条候选发起一次流式请求；effort 为空则不注入 reasoningEffort
   async *_attemptStream(c, options, effort, attempt, schemeName, now, attempts = this.attempts) {
@@ -1242,7 +1391,7 @@ class PoolAdapter {
       if (isErrFinish(chunk)) {
         const fail = chunk.reason?.failure;
         __poolDiag(`[stream] ${c.entry} 错误块 code=${fail?.code || ""} seen=${seen} msg=${String(fail?.message || "").slice(0, 160)}`);
-        if (!seen) throw new Error(describeFailure(fail, `${c.entry} 无正文错误`));
+        if (!seen) throw makeFailureError(fail, `${c.entry} 无正文错误`);
         // 已经产出过内容后中途断流：不能装作成功。
         // 旧版这里直接 `yield chunk; return`，既没写 attempt.error 也没写冷却
         // （本来负责这件事的 _wrap 从未被调用），面板上就留下 `ok:false / error:null`
@@ -1255,7 +1404,7 @@ class PoolAdapter {
         attempt.status = fail?.status || null;
         attempt.rawError = fail ? (typeof fail === "object" ? JSON.stringify(fail, null, 2) : String(fail)) : attempt.error;
         if (this.lastUse && this.lastUse.entry === c.entry) this.lastUse.midStreamError = attempt.error;
-        this._recordFailure(c.entry, now);
+        this._recordFailure(c.entry, now, fail ? { ...fail, message: fail.message || attempt.error } : { message: attempt.error });
         yield chunk;
         return;
       }
@@ -1281,6 +1430,7 @@ class PoolAdapter {
     if (!seen) throw new Error(`${c.entry} 返回空流（无可见正文）`);
     this.failureStreaks.delete(c.entry);
     this.cooldown.delete(c.entry);
+    this.cooldownMeta.delete(c.entry);
     } catch (error) {
       throw error;
     } finally {
@@ -1312,22 +1462,59 @@ class PoolAdapter {
       diag(`refreshRegistered 失败: ${e?.message}`);
     }
   }
+  _coolingSnapshot(now = Date.now()) {
+    return [...this.cooldown.entries()]
+      .map(([entry, until]) => {
+        const meta = this.cooldownMeta.get(entry) || {};
+        return {
+          entry,
+          until,
+          remainingMs: Math.max(0, until - now),
+          streak: this.failureStreaks.get(entry) || 1,
+          code: meta.code || null,
+          source: meta.source || null,
+          retryAfterMs: meta.retryAfterMs ?? null,
+          message: meta.message || null
+        };
+      })
+      .filter((x) => x.remainingMs > 0)
+      .sort((a, b) => a.remainingMs - b.remainingMs);
+  }
+
+  _unavailableError(schemeName, chainLength, attempts, now = Date.now(), code = null) {
+    const cooling = this._coolingSnapshot(now);
+    const sourceAttempts = attempts?.length ? attempts : (Array.isArray(this.lastAttempts) ? this.lastAttempts : []);
+    const lastFail = [...sourceAttempts].reverse().find((attempt) => attempt && attempt.error);
+    const earliestMs = cooling.length ? cooling[0].remainingMs : 0;
+    let message = `ModelPool: 方案「${schemeName || "未命名"}」链上 ${chainLength} 条候选均不可用`;
+    if (cooling.length) {
+      message += `：全部处于冷却中，最早 ${Math.ceil(earliestMs / 1000)} 秒后恢复`;
+    }
+    if (lastFail) {
+      message += `；上次失败：${lastFail.entry} ${String(lastFail.error).slice(0, 160)}`;
+    }
+    const err = new Error(message);
+    err.code = code || (cooling.length ? "ALL_COOLING" : "ALL_UNAVAILABLE");
+    err.scheme = schemeName || null;
+    err.retryAt = cooling.length ? now + earliestMs : null;
+    err.cooling = cooling;
+    err.attempts = sourceAttempts;
+    return err;
+  }
+
   // 供面板读取：最近命中 + 本次尝试 + 冷却中条目
   status() {
     const maxBackoffMs = this._maxBackoffMs();
+    const attempts = Array.isArray(this.attempts) && this.attempts.length > 0
+      ? this.attempts
+      : (Array.isArray(this.lastAttempts) ? this.lastAttempts : []);
     return {
       lastUse: this.lastUse,
-      attempts: this.attempts,
+      attempts,
+      attemptsAt: this.lastAttemptsAt || 0,
       cooldownMs: this._cooldownMs(),
       maxBackoffMs,
-      cooling: [...this.cooldown.entries()]
-        .map(([entry, until]) => ({
-          entry,
-          until,
-          remainingMs: Math.max(0, until - Date.now()),
-          streak: this.failureStreaks.get(entry) || 1
-        }))
-        .filter((x) => x.remainingMs > 0)
+      cooling: this._coolingSnapshot()
     };
   }
   // 清空冷却与连续失败退避计数（支持指定 entry 或清空全部）
@@ -1335,9 +1522,11 @@ class PoolAdapter {
     if (entry) {
       this.cooldown.delete(entry);
       this.failureStreaks.delete(entry);
+      this.cooldownMeta.delete(entry);
     } else {
       this.cooldown.clear();
       this.failureStreaks.clear();
+      this.cooldownMeta.clear();
     }
   }
 }
@@ -2098,14 +2287,25 @@ function apply(ctx) {
         const live = ctx.get("llm") || llm;
         const state = readState(profile);
         const schemeName = state.activeScheme;
-        const chain = Array.isArray(state.schemes?.[schemeName]?.chain) ? state.schemes[schemeName].chain : [];
+        const schemes = state.schemes || {};
+        const allKeys = [];
+        const seen = new Set();
+        // 档位表覆盖所有方案的并集：输入框标签显示的是「上次实际命中」的方案，
+        // 它未必是面板里的 activeScheme（例如选中 Gemini flash 方案、激活的却是纯deepseek）。
+        for (const name of Object.keys(schemes)) {
+          const chain = Array.isArray(schemes[name]?.chain) ? schemes[name].chain : [];
+          for (const raw of chain.slice(0, 60)) {
+            const key = typeof raw === "string" ? raw : (raw && raw.entry) || "";
+            if (key.indexOf("/") <= 0 || seen.has(key)) continue;
+            seen.add(key);
+            allKeys.push(key);
+          }
+        }
         const now = Date.now();
         const entries = {};
         const jobs = [];
-        for (const raw of chain.slice(0, 60)) {
-          const key = typeof raw === "string" ? raw : (raw && raw.entry) || "";
+        for (const key of allKeys) {
           const slash = key.indexOf("/");
-          if (slash <= 0) continue;
           const provider = key.slice(0, slash);
           const model = key.slice(slash + 1);
           jobs.push((async () => {
