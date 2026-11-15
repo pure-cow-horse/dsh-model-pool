@@ -2026,8 +2026,11 @@
     const [wbRate, setWbRate] = useState(null);
     const useSigRef = useRef("-");
     const chainSigRef = useRef("");
+    // P0-5：非池标签只显示模型名/倍率，不启动 current/chain/models/efforts 轮询。
+    const isPool = props?.provider?.id === "ModelPool" || props?.model?.provider === "ModelPool";
     useEffect(() => {
       let alive = true;
+      if (!isPool) return () => { alive = false; };
       // 2026-10-26 P0：原来每 3 秒把 /current + /models（330 行/80KB）+ /chain 一起拉一遍，
       // 只为显示一个「供应商 / 模型」文本。现在拆成三条各自节奏：
       //   命中标签 5 秒（/current 只有 <1KB）、方案与强度 30 秒、清单 5 分钟（模块级缓存）。
@@ -2035,7 +2038,7 @@
       const tickCurrent = async () => {
         if (document.hidden) return;
         try {
-          const cj = await fetch("/api/model-pool/current", { cache: "no-store" }).then((r) => r.json()).catch(() => null);
+          const cj = await fetch("/api/model-pool/current?compact=1", { cache: "no-store" }).then((r) => r.json()).catch(() => null);
           if (!alive || !cj || !cj.ok) return;
           const next = cj.status?.lastUse || null;
           const sig = next ? `${next.entry}|${next.at}` : "-";
@@ -2047,7 +2050,7 @@
       const tickChain = async () => {
         if (document.hidden) return;
         try {
-          const ch = await fetch("/api/model-pool/chain", { cache: "no-store" }).then((r) => r.json()).catch(() => null);
+          const ch = await fetch("/api/model-pool/chain?compact=1", { cache: "no-store" }).then((r) => r.json()).catch(() => null);
           if (!alive || !ch || !ch.ok) return;
           const sn = ch.state?.activeScheme;
           const schemes = ch.state?.schemes || {};
@@ -2063,7 +2066,11 @@
           if (cached) { if (alive) setByKey(cached); return; }
         }
         try {
-          const mj = await fetch("/api/model-pool/models", { cache: "no-store" }).then((r) => r.json()).catch(() => null);
+          // ETag + gzip：浏览器缓存 default 模式会带 If-None-Match；
+          // 304 时直接沿用已有清单，避免把 120KB 目录反复传一遍。
+          const res = await fetch("/api/model-pool/models", { cache: "default" });
+          if (res.status === 304) return;
+          const mj = await res.json().catch(() => null);
           if (!alive || !mj || !mj.ok || !Array.isArray(mj.models)) return;
           const map = {};
           for (const row of mj.models) map[row.key] = row;
@@ -2083,10 +2090,11 @@
         clearInterval(tChain);
         clearInterval(tModels);
       };
-    }, []);
+    }, [isPool]);
     // 档位能力：60 秒拉一次（后端另有 5 分钟缓存）。页面隐藏时跳过。
     useEffect(() => {
       let alive = true;
+      if (!isPool) return () => { alive = false; };
       const load = async () => {
         if (document.hidden) return;
         try {
@@ -2097,14 +2105,13 @@
       load();
       const t = setInterval(load, 60000);
       return () => { alive = false; clearInterval(t); };
-    }, []);
+    }, [isPool]);
 
     // 倍率读数（2026-11-05）：模型池占住输入框单槽后，dsh-connect-workbuddy 的
     // 胶囊被压掉，切到具体模型时连「这个模型花多少积分」也一起看不见了。
     // 这里直连它的只读用量路由把这一条补回来——同源、只读、拿不到就静默降级，
     // 插件没装 / 停用 / 改版都不影响对话。
     // 2026-11-14：倍率模型改成「档位条当前锚定的渠道」，不再一律取 lastUse。
-    const isPool = props?.provider?.id === "ModelPool" || props?.model?.provider === "ModelPool";
     const name = props?.model?.name || "";
 
     // 档位锚点（2026-11-14）：模型选择器里的 id 就是方案名（服务端 listModels 如此）。
@@ -2112,6 +2119,10 @@
     // 现在的优先级：选中方案内的实际命中 > 选中方案的链首候选 > 非池模式沿用当前模型。
     const entriesMap = caps?.entries || {};
     const providerEfforts = caps?.providerEfforts || {};
+    // P0-4：先按 provider/model 条目取记忆；entryEfforts 一旦存在，就不再用
+    // provider 级旧记忆，避免同一供应商不同模型互相串档位。
+    const entryEfforts = caps?.entryEfforts || {};
+    const hasEntryMemory = Object.keys(entryEfforts).length > 0;
     const schemeNames = Object.keys(chain?.schemes || {});
     const schemeNameOf = (value) => {
       if (typeof value !== "string") return "";
@@ -2178,11 +2189,14 @@
     else if (typeof cap?.supported === "string" && cap.supported) supported = [cap.supported];
     const names = cap?.names || {};
     const levelName = (id) => (id === "" ? "自动" : names[id] || { off: "Off", minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "XHigh", max: "Max" }[id] || id);
-    const remembered = providerEfforts[currentProvider];
+    const entryMemory = anchorEntry ? entryEfforts[anchorEntry] : void 0;
+    const providerMemory = !hasEntryMemory ? providerEfforts[currentProvider] : void 0;
     const fallbackEffort = selectedSchemeName
       ? selectedEffort
       : (chain?.schemes?.[chain?.active]?.effort || "");
-    const current = typeof remembered === "string" ? remembered : fallbackEffort;
+    const current = typeof entryMemory === "string"
+      ? entryMemory
+      : (typeof providerMemory === "string" ? providerMemory : fallbackEffort);
 
     useEffect(() => {
       let alive = true;
@@ -2217,24 +2231,27 @@
       return React.createElement("span", { style: { display: "inline-flex", alignItems: "center", minWidth: 0 } }, name, rateBadge);
     }
 
-    // 档位控件（2026-11-14）：集合与记忆值都锚定到上面算出的 currentProvider。
+    // 档位控件（2026-11-14，P0-4 加固）：集合与记忆值锚定到 anchorEntry。
     // 同一模型在不同渠道可以有不同档位（aistudio 是 low/medium/high，
-    // aistudio2api 是 off/low/medium/high），所以绝不按模型名合并。
+    // aistudio2api 是 off/low/medium/high），同一个渠道不同模型也可能不同；
+    // 因此不再写 provider 级记忆，保存前还要校验该档位在该条目的 supported 内。
     const stopAll = (e) => { e.stopPropagation(); };
 
     const saveEffort = async (v) => {
+      if (!anchorEntry || !currentProvider) return;
+      if (v !== "" && !(supported || []).includes(v)) return; // 非法档位不写入
       try {
         const cur = await fetch("/api/model-pool/chain").then((r) => r.json());
         if (!cur.ok) return;
-        const nextProviderEfforts = { ...(cur.state?.providerEfforts || {}) };
-        if (!currentProvider) return;
-        if (v === "") delete nextProviderEfforts[currentProvider];
-        else nextProviderEfforts[currentProvider] = v;
-        setCaps((c) => ({ ...(c || {}), providerEfforts: nextProviderEfforts }));
+        const nextEntryEfforts = { ...(cur.state?.entryEfforts || {}) };
+        // 空字符串表示「这个条目选自动」；保留键而不是删除，避免整张表变空后
+        // 又回落到旧 providerEfforts，把之前的供应商档位重新带回来。
+        nextEntryEfforts[anchorEntry] = v;
+        setCaps((c) => ({ ...(c || {}), entryEfforts: nextEntryEfforts }));
         await fetch("/api/model-pool/chain", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ providerEfforts: nextProviderEfforts })
+          body: JSON.stringify({ entryEfforts: nextEntryEfforts })
         });
       } catch { /* 下一轮轮询会纠正 */ }
     };
@@ -2266,7 +2283,7 @@
             React.createElement("button", {
               key: v || "auto",
               type: "button",
-              title: v === "" ? "不注入推理强度，由渠道自己决定" : `推理强度 ${levelName(v)}（按供应商记忆）`,
+              title: v === "" ? "不注入推理强度，由渠道自己决定" : `推理强度 ${levelName(v)}（按当前渠道条目记忆）`,
               onClick: (e) => { stopAll(e); saveEffort(v); },
               style: {
                 fontSize: 11, lineHeight: "16px", padding: "0 7px", borderRadius: 999,
@@ -2293,7 +2310,7 @@
       label,
       rateBadge,
       React.createElement("span", {
-        title: `推理等级：${supported === null ? "档位未知" : levelName(current)}（点开模型名可调；按供应商记忆）`,
+        title: `推理等级：${supported === null ? "档位未知" : levelName(current)}（点开模型名可调；按当前渠道条目记忆）`,
         style: { marginLeft: 6, color: "#8b949e", whiteSpace: "nowrap", flexShrink: 0 }
       }, `· ${supported === null ? "档位未知" : levelName(current)}`)
     );

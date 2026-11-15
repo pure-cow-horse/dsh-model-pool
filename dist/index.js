@@ -4,7 +4,8 @@
 import { existsSync, readFileSync, writeFileSync, appendFileSync, renameSync, unlinkSync, readdirSync, statSync, mkdirSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
 import { homedir } from "node:os";
-import { zstdDecompressSync } from "node:zlib";
+import { zstdDecompressSync, gzipSync } from "node:zlib";
+import { createHash } from "node:crypto";
 import { load as loadYAML, DEFAULT_SCHEMA, Schema as YamlSchema, Type as YamlType } from "js-yaml";
 
 // 顶层加载诊断（区分导入失败 / apply 抛错）
@@ -870,7 +871,7 @@ function readState(profile) {
   const fp = dataFile(profile);
   let stamp;
   try { stamp = statSync(fp); } catch { stamp = null; }
-  if (!stamp) return { activeScheme: "default", schemes: { default: { builtin: "tier", chain: [] } }, probeCache: {} };
+  if (!stamp) return { activeScheme: "default", schemes: { default: { builtin: "tier", chain: [] } }, probeCache: {}, entryEfforts: {} };
   const hit = stateCache.get(fp);
   if (hit && hit.mtimeMs === stamp.mtimeMs && hit.size === stamp.size) return hit.value;
   try {
@@ -878,7 +879,7 @@ function readState(profile) {
     stateCache.set(fp, { mtimeMs: stamp.mtimeMs, size: stamp.size, value });
     return value;
   } catch {
-    return { activeScheme: "default", schemes: {}, probeCache: {} };
+    return { activeScheme: "default", schemes: {}, probeCache: {}, entryEfforts: {} };
   }
 }
 function writeState(profile, state) {
@@ -931,6 +932,80 @@ function sendJson(res, code, obj) {
   res.statusCode = code;
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   res.end(JSON.stringify(obj));
+}
+
+// P2 HTTP：/models 这类大响应按内容生成 ETag，命中 If-None-Match 直接 304；
+// 接受 gzip 时压缩传输。ETag 基于未压缩 body，因此不同编码共用同一个
+// 内容标识，Vary: Accept-Encoding 让中间缓存分别保存压缩/非压缩版本。
+function wantsCompact(req) {
+  try {
+    const url = new URL(req.url || "/", "http://127.0.0.1");
+    const value = url.searchParams.get("compact");
+    return value === "" || value === "1" || value === "true" || value === "yes";
+  } catch {
+    return false;
+  }
+}
+
+function etagMatches(header, etag) {
+  const raw = String(header || "").trim();
+  if (!raw) return false;
+  return raw.split(",").some((part) => {
+    const token = part.trim().replace(/^W\//, "");
+    return token === "*" || token === etag;
+  });
+}
+
+function sendJsonCached(req, res, obj) {
+  const body = JSON.stringify(obj);
+  const etag = `"${createHash("sha1").update(body).digest("hex")}"`;
+  res.setHeader("ETag", etag);
+  res.setHeader("Cache-Control", "private, no-cache");
+  res.setHeader("Vary", "Accept-Encoding");
+  if (etagMatches(req?.headers?.["if-none-match"], etag)) {
+    res.statusCode = 304;
+    res.end();
+    return;
+  }
+  res.statusCode = 200;
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  if (/\bgzip\b/i.test(String(req?.headers?.["accept-encoding"] || ""))) {
+    res.setHeader("Content-Encoding", "gzip");
+    res.end(gzipSync(Buffer.from(body, "utf8")));
+  } else {
+    res.end(body);
+  }
+}
+
+// /chain 的 compact 只保留输入框标签真正需要的「激活方案 + 方案链 + 方案默认档位」，
+// 去掉 disabledProviders/probeCache 等大块；/current 的 compact 只保留 lastUse 与冷却摘要。
+function compactChainState(state) {
+  const schemes = {};
+  for (const [name, scheme] of Object.entries(state?.schemes || {})) {
+    if (!scheme || typeof scheme !== "object") continue;
+    schemes[name] = {
+      chain: Array.isArray(scheme.chain) ? scheme.chain : [],
+      effort: typeof scheme.effort === "string" ? scheme.effort : ""
+    };
+    if (scheme.builtin) schemes[name].builtin = scheme.builtin;
+  }
+  return { activeScheme: state?.activeScheme || "default", schemes };
+}
+
+function compactCurrentStatus(status) {
+  const cooling = Array.isArray(status?.cooling)
+    ? status.cooling.map(({ entry, remainingMs, code, source }) => ({
+        entry,
+        remainingMs,
+        code: code || null,
+        source: source || null
+      }))
+    : [];
+  return {
+    lastUse: status?.lastUse || null,
+    attemptsAt: status?.attemptsAt || 0,
+    cooling
+  };
 }
 const LOCAL = new Set(["localhost", "127.0.0.1", "[::1]", "::1", "0.0.0.0"]);
 function isLocalOrigin(req) {
@@ -1231,13 +1306,23 @@ class PoolAdapter {
       // 要把冷却到什么时候、上一次真实错误一并带回去。status().attempts 也会回退到 lastAttempts。
       throw this._unavailableError(schemeName, chain.length, attempts, now, "ALL_COOLING");
     }
-    // 按供应商记忆档位（方案 A）：每个候选用它自己供应商上次选的档位，
-    // 没选过才回落到方案默认值。这样降级到另一家时，不会塞它不认的档位
-    // （宿主会报 UNSUPPORTED_REASONING_EFFORT，白白多一次往返）。
-    const providerEfforts = this.readState()?.providerEfforts || {};
-    const effortFor = (provider) => {
-      const remembered = providerEfforts[provider];
-      return typeof remembered === "string" ? remembered : effort;
+    // P0-4：档位记忆主键是 provider/model 条目，而不是 provider。
+    // 同一个模型在不同渠道、同一个渠道的不同模型都可能支持不同档位；
+    // entryEfforts 一旦有值就优先使用。旧 providerEfforts 只在整个 entry
+    // 记忆为空时作为兼容回退，避免旧状态把某个模型的档位串到同供应商其他模型。
+    const state = this.readState() || {};
+    const entryEfforts = state.entryEfforts && typeof state.entryEfforts === "object" ? state.entryEfforts : {};
+    const providerEfforts = state.providerEfforts || {};
+    const hasEntryMemory = Object.keys(entryEfforts).length > 0;
+    const effortFor = (provider, entry) => {
+      if (entry && Object.prototype.hasOwnProperty.call(entryEfforts, entry) && typeof entryEfforts[entry] === "string") {
+        return entryEfforts[entry];
+      }
+      if (!hasEntryMemory) {
+        const remembered = providerEfforts[provider];
+        if (typeof remembered === "string") return remembered;
+      }
+      return effort;
     };
     let lastError;
     for (const c of candidates) {
@@ -1279,7 +1364,7 @@ class PoolAdapter {
       // 已知不支持的档位先记下来（entry → {effort, until}，10 分钟过期）：方案固定
       // effort=medium 而渠道目录只有 high/max/low 时，**每一回合**都要先吃一次本地
       // 拒绝再回落（2026-10-24 实测 270 次/天），记住后直接走默认档，省掉那次空跑。
-      const cEffort = effortFor(c.provider);
+      const cEffort = effortFor(c.provider, c.entry);
       const blockedEffort = this.effortUnsupported.get(c.entry);
       const effortBlocked = cEffort !== "" && blockedEffort !== void 0 && blockedEffort.effort === cEffort && now < blockedEffort.until;
       let variants = cEffort ? [cEffort, ""] : [""];
@@ -2007,12 +2092,27 @@ function apply(ctx) {
   // 档位能力缓存：provider/model -> { at, value: { supported, names, defaultEffort, error } }
   const EFFORT_CAP_TTL_MS = 5 * 60 * 1000;
   const effortCapCache = new Map();
+  const VALID_EFFORT_IDS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+  const isValidEntryKey = (key) => typeof key === "string" && key.length <= 200 && key.indexOf("/") > 0 && key.indexOf("/") < key.length - 1;
+  const sanitizeEntryEfforts = (input) => {
+    const out = {};
+    if (!input || typeof input !== "object" || Array.isArray(input)) return out;
+    for (const [entry, raw] of Object.entries(input)) {
+      if (!isValidEntryKey(entry) || typeof raw !== "string") continue;
+      const effortValue = raw.trim();
+      if (effortValue !== "" && !VALID_EFFORT_IDS.has(effortValue)) continue;
+      const cached = effortCapCache.get(entry)?.value;
+      if (effortValue !== "" && cached && Array.isArray(cached.supported) && !cached.supported.includes(effortValue)) continue;
+      out[entry] = effortValue;
+    }
+    return out;
+  };
 
   // GET /api/model-pool/models —— 拉上游全目录并合并已配置模型
   reg({
     kind: "exact",
     path: "/api/model-pool/models",
-    handler: async (_req, res) => {
+    handler: async (req, res) => {
       try {
         diag("/models hit");
         await adapter.refreshRegistered();
@@ -2093,7 +2193,7 @@ function apply(ctx) {
         diag(`rows=${rows.length} runtimeProviders=${rt.providers.length} rtIds=[${rt.providers.map((p) => p.provider).join(",")}]`);
         const locals = localCatalogRows();
         diag(`localCatalog=[${locals.map((l) => `${l.provider}:${l.models.length}`).join(",")}]`);
-        sendJson(res, 200, { ok: true, count: rows.length, models: rows });
+        sendJsonCached(req, res, { ok: true, count: rows.length, models: rows });
       } catch (e) { diag(`/models error: ${e?.message}\n${e?.stack || ""}`); sendJson(res, 500, { ok: false, error: e.message }); }
     }
   });
@@ -2169,9 +2269,13 @@ function apply(ctx) {
   reg({
     kind: "exact",
     path: "/api/model-pool/current",
-    handler: async (_req, res) => {
+    handler: async (req, res) => {
       try {
-        sendJson(res, 200, { ok: true, status: typeof adapter.status === "function" ? adapter.status() : null, routeConflicts });
+        const status = typeof adapter.status === "function" ? adapter.status() : null;
+        if (wantsCompact(req)) {
+          return sendJson(res, 200, { ok: true, compact: true, status: compactCurrentStatus(status) });
+        }
+        sendJson(res, 200, { ok: true, status, routeConflicts });
       } catch (e) { sendJson(res, 500, { ok: false, error: e.message }); }
     }
   });
@@ -2332,7 +2436,7 @@ function apply(ctx) {
           })());
         }
         await Promise.all(jobs);
-        sendJson(res, 200, { ok: true, scheme: schemeName, providerEfforts: state.providerEfforts || {}, entries });
+        sendJson(res, 200, { ok: true, scheme: schemeName, providerEfforts: state.providerEfforts || {}, entryEfforts: state.entryEfforts || {}, entries });
       } catch (e) {
         sendJson(res, 500, { ok: false, error: e?.message || String(e) });
       }
@@ -2354,14 +2458,26 @@ function apply(ctx) {
         if (body.contextWindow !== undefined) state.contextWindow = body.contextWindow; // 全局上下文窗口覆盖
         if (body.cooldownMs !== undefined) state.cooldownMs = body.cooldownMs; // 失败渠道冷却时长（毫秒）
         if (body.maxBackoffMs !== undefined) state.maxBackoffMs = body.maxBackoffMs; // 指数退避上限（毫秒）
-        // 按供应商记忆档位：整体替换（前端传全量映射），不做深合并，避免删不掉旧键
+        // P0-4：按 provider/model 条目记忆档位；整体替换（前端传全量映射），
+        // 并逐条校验 effort id 与当前能力缓存，防止把不支持的档位写进状态。
+        if (body.entryEfforts !== undefined) {
+          if (!body.entryEfforts || typeof body.entryEfforts !== "object" || Array.isArray(body.entryEfforts)) {
+            return sendJson(res, 400, { ok: false, error: "entryEfforts 必须是对象" });
+          }
+          state.entryEfforts = sanitizeEntryEfforts(body.entryEfforts);
+        }
+        // 兼容旧字段：按供应商记忆仍保留可读，但新 UI 不再写入它。
         if (body.providerEfforts !== undefined && body.providerEfforts !== null && typeof body.providerEfforts === "object") {
           state.providerEfforts = body.providerEfforts;
         }
         writeState(profile, state);
+        if (wantsCompact(req)) return sendJson(res, 200, { ok: true, compact: true, state: compactChainState(state) });
         return sendJson(res, 200, { ok: true, state });
       }
-      sendJson(res, 200, { ok: true, state: readState(profile) });
+      const state = readState(profile);
+      if (!state.entryEfforts || typeof state.entryEfforts !== "object" || Array.isArray(state.entryEfforts)) state.entryEfforts = {};
+      if (wantsCompact(req)) return sendJson(res, 200, { ok: true, compact: true, state: compactChainState(state) });
+      sendJson(res, 200, { ok: true, state });
     }
   });
 
@@ -2374,6 +2490,7 @@ function apply(ctx) {
 }
 
 export { apply, inject, name, TRIGGER_CODES };
+export { sendJsonCached as __sendJsonCached, compactChainState as __compactChainState, compactCurrentStatus as __compactCurrentStatus };
 // 只给探针：台账的合并/切天/保留期不该只靠看界面来验。
 export { recordPoolUsage as __recordPoolUsage, usageReport as __usageReport, flushUsage as __flushUsage, usageDayKey as __usageDayKey };
 export { foldSessionText as __foldSessionText, decompressSessionBuffer as __decompressSessionBuffer, replayDirectUsage as __replayDirectUsage };
